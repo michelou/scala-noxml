@@ -1,0 +1,11 @@
+collection/CustomParallelizable.scala
+collection/Parallel.scala
+collection/Parallelizable.scala
+collection/generic/CanCombineFrom.scala
+collection/generic/GenericParCompanion.scala
+collection/generic/GenericParTemplate.scala
+collection/generic/HasNewCombiner.scala
+collection/generic/ParFactory.scala
+collection/generic/ParMapFactory.scala
+collection/generic/ParSetFactory.scala
+

@@ -1,0 +1,6 @@
+scala/tools/ant/Scaladoc.scala
+scala/tools/nsc/ScalaDoc.scala
+scala/tools/nsc/ast/parser/MarkupParsers.scala
+scala/tools/nsc/ast/parser/SymbolicXMLBuilder.scala
+scala/tools/nsc/doc/**
+scala/tools/nsc/interpreter/XMLCompletion.scala

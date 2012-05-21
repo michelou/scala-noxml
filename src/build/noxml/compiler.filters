@@ -1,0 +1,10 @@
+scala/tools/ant/ScalaBazaar.scala
+scala/tools/nsc/ast/parser/Parsers.scala
+scala/tools/nsc/ast/parser/Scanners.scala
+scala/tools/nsc/ast/parser/SyntaxAnalyzer.scala
+scala/tools/nsc/ast/parser/Tokens.scala
+scala/tools/nsc/interpreter/ReplTokens.scala
+scala/tools/nsc/plugins/Plugin.scala
+scala/tools/nsc/plugins/PluginDescription.scala
+scala/tools/util/XML.scala
+
