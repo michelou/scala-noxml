@@ -1,0 +1,44 @@
+#/bin/sh --posix
+
+SOURCE_DIR=$HOME/workspace/scala/src/
+TARGET_DIR=$HOME/workspace/scala-noxml/trunk/src/
+TMPFILE=/tmp/_toto0123.diff
+
+checkfiles() {
+    for i in ${SOURCE_FILES} ""; do
+        [ -z "$i" ] && continue;
+        diff ${SOURCE_DIR}$i ${TARGET_DIR}$i > ${TMPFILE}
+        SIZE=`ls -s ${TMPFILE} | cut -d ' ' -f 1`
+        if [[ ${SIZE} -gt 0 ]]; then
+            echo "******* ${SOURCE_DIR}$i"
+            cat ${TMPFILE}
+        fi
+    done
+}
+
+SOURCE_FILES=`find $SOURCE_DIR -name "*.scala" | sed "s#\$SOURCE_DIR##g"`
+checkfiles
+
+SOURCE_FILES=`find $SOURCE_DIR -name "*.java" | sed "s#\$SOURCE_DIR##g"`
+checkfiles
+
+###########################################################################
+
+SOURCE_FILES=`find $SOURCE_DIR -name "*.css" | sed "s#\$SOURCE_DIR##g"`
+checkfiles
+
+SOURCE_FILES=`find $SOURCE_DIR -name "*.gif" | sed "s#\$SOURCE_DIR##g"`
+checkfiles
+
+SOURCE_FILES=`find $SOURCE_DIR -name "*.js" | sed "s#\$SOURCE_DIR##g"`
+checkfiles
+
+SOURCE_FILES=`find $SOURCE_DIR -name "*.tmpl" | sed "s#\$SOURCE_DIR##g"`
+checkfiles
+
+SOURCE_FILES=`find $SOURCE_DIR -name "*.txt" | sed "s#\$SOURCE_DIR##g"`
+checkfiles
+
+SOURCE_FILES=`find $SOURCE_DIR -name "*.xml" | sed "s#\$SOURCE_DIR##g"`
+checkfiles
+

@@ -1,0 +1,56 @@
+#/bin/sh --posix
+
+SOURCE_DIR=$HOME/workspace/scala/test/files
+TARGET_DIR=$HOME/workspace/scala-noxml/trunk/test/files
+TMPFILE=/tmp/_tata0789.diff
+
+checkfiles() {
+    for i in ${SOURCE_FILES} ""; do
+        [ -z "$i" ] && continue;
+        diff ${SOURCE_DIR}$i ${TARGET_DIR}$i > ${TMPFILE}
+        SIZE=`ls -s ${TMPFILE} | cut -d ' ' -f 1`
+        if [[ ${SIZE} -gt 0 ]]; then
+            echo "******* ${SOURCE_DIR}$i"
+            cat ${TMPFILE}
+        fi
+    done
+}
+
+SOURCE_FILES=`find $SOURCE_DIR -name "*.scala" | sed "s#\$SOURCE_DIR##g"`
+checkfiles
+
+SOURCE_FILES=`find $SOURCE_DIR -name "*.java" | sed "s#\$SOURCE_DIR##g"`
+checkfiles
+
+SOURCE_FILES=`find $SOURCE_DIR -name "*.check" | sed "s#\$SOURCE_DIR##g"`
+checkfiles
+
+SOURCE_FILES=`find $SOURCE_DIR -name "*.jar" | sed "s#\$SOURCE_DIR##g"`
+checkfiles
+
+SOURCE_FILES=`find $SOURCE_DIR -name "*.flags" | sed "s#\$SOURCE_DIR##g"`
+checkfiles
+
+SOURCE_FILES=`find $SOURCE_DIR -name "*.opts" | sed "s#\$SOURCE_DIR##g"`
+checkfiles
+
+SOURCE_FILES=`find $SOURCE_DIR -name "*.res" | sed "s#\$SOURCE_DIR##g"`
+checkfiles
+
+#########################################################################
+
+SOURCE_DIR=$HOME/workspace/scala/test/scaladoc
+TARGET_DIR=$HOME/workspace/scala-noxml/trunk/test/scaladoc
+
+SOURCE_FILES=`find $SOURCE_DIR -name "*.scala" | sed "s#\$SOURCE_DIR##g"`
+checkfiles
+
+SOURCE_FILES=`find $SOURCE_DIR -name "*.flags" | sed "s#\$SOURCE_DIR##g"`
+checkfiles
+
+SOURCE_FILES=`find $SOURCE_DIR -name "*.html" | sed "s#\$SOURCE_DIR##g"`
+checkfiles
+
+SOURCE_FILES=`find $SOURCE_DIR -name "*.js" | sed "s#\$SOURCE_DIR##g"`
+checkfiles
+
