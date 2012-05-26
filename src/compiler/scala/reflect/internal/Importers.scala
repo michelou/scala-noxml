@@ -4,24 +4,62 @@ import scala.collection.mutable.WeakHashMap
 
 trait Importers { self: SymbolTable =>
 
-  abstract class Importer {
+  // [Eugene] possible to make this less cast-heavy?
+  def mkImporter(from0: api.Universe): Importer { val from: from0.type } = (
+    if (self eq from0) {
+      new Importer {
+        val from = from0
+        val reverse = this.asInstanceOf[from.Importer{ val from: self.type }]
+        def importSymbol(sym: from.Symbol) = sym.asInstanceOf[self.Symbol]
+        def importType(tpe: from.Type) = tpe.asInstanceOf[self.Type]
+        def importTree(tree: from.Tree) = tree.asInstanceOf[self.Tree]
+      }
+    } else {
+      // todo. fix this loophole
+      assert(from0.isInstanceOf[SymbolTable], "`from` should be an instance of scala.reflect.internal.SymbolTable")
+      new StandardImporter { val from = from0.asInstanceOf[SymbolTable] }
+    }
+  ).asInstanceOf[Importer { val from: from0.type }]
+
+  abstract class StandardImporter extends Importer {
 
     val from: SymbolTable
 
     lazy val symMap: WeakHashMap[from.Symbol, Symbol] = new WeakHashMap
+    lazy val tpeMap: WeakHashMap[from.Type, Type] = new WeakHashMap
 
-    object reverse extends from.Importer {
-      val from: self.type = self
-      for ((fromsym, mysym) <- Importer.this.symMap) symMap += ((mysym, fromsym))
+    // fixups and maps prevent stackoverflows in importer
+    var pendingSyms = 0
+    var pendingTpes = 0
+    lazy val fixups = collection.mutable.MutableList[Function0[Unit]]()
+    def addFixup(fixup: => Unit): Unit = fixups += (() => fixup)
+    def tryFixup(): Unit = {
+      if (pendingSyms == 0 && pendingTpes == 0) {
+        val fixups = this.fixups.toList
+        this.fixups.clear()
+        fixups foreach { _() }
+      }
     }
 
-    def importPosition(pos: from.Position): Position = NoPosition
+    object reverse extends from.StandardImporter {
+      val from: self.type = self
+      for ((fromsym, mysym) <- StandardImporter.this.symMap) symMap += ((mysym, fromsym))
+      for ((fromtpe, mytpe) <- StandardImporter.this.tpeMap) tpeMap += ((mytpe, fromtpe))
+    }
 
-    def importSymbol(sym: from.Symbol): Symbol = {
+    // todo. careful import of positions
+    def importPosition(pos: from.Position): Position =
+      pos.asInstanceOf[Position]
+
+    def importSymbol(sym0: from.Symbol): Symbol = {
       def doImport(sym: from.Symbol): Symbol = {
+        if (symMap.contains(sym))
+          return symMap(sym)
+
         val myowner = importSymbol(sym.owner)
-        val mypos = importPosition(sym.pos)
-        val myname = importName(sym.name)
+        val mypos   = importPosition(sym.pos)
+        val myname  = importName(sym.name).toTermName
+        val myflags = sym.flags
         def linkReferenced(mysym: TermSymbol, x: from.TermSymbol, op: from.Symbol => Symbol): Symbol = {
           symMap(x) = mysym
           mysym.referenced = op(x.referenced)
@@ -29,46 +67,49 @@ trait Importers { self: SymbolTable =>
         }
         val mysym = sym match {
           case x: from.MethodSymbol =>
-            linkReferenced(new MethodSymbol(myowner, mypos, myname), x, importSymbol)
+            linkReferenced(myowner.newMethod(myname, mypos, myflags), x, importSymbol)
           case x: from.ModuleSymbol =>
-            linkReferenced(new ModuleSymbol(myowner, mypos, myname), x, doImport)
-          case x: from.FreeVar =>
-            new FreeVar(importName(x.name), importType(x.tpe), x.value)
+            linkReferenced(myowner.newModuleSymbol(myname, mypos, myflags), x, importSymbol)
+          case x: from.FreeTerm =>
+            newFreeTermSymbol(importName(x.name).toTermName, importType(x.info), x.value, x.flags, x.origin)
+          case x: from.FreeType =>
+            newFreeTypeSymbol(importName(x.name).toTypeName, importType(x.info), x.value, x.flags, x.origin)
           case x: from.TermSymbol =>
-            linkReferenced(new TermSymbol(myowner, mypos, myname), x, importSymbol)
+            linkReferenced(myowner.newValue(myname, mypos, myflags), x, importSymbol)
           case x: from.TypeSkolem =>
-            new TypeSkolem(myowner, mypos, myname.toTypeName, x.unpackLocation match {
-              case null => null
-              case y: from.Tree => importTree(y)
+            val origin = x.unpackLocation match {
+              case null           => null
+              case y: from.Tree   => importTree(y)
               case y: from.Symbol => importSymbol(y)
-            })
-          /*
-              case x: from.ModuleClassSymbol =>
-                val mysym = new ModuleClassSymbol(myowner, mypos, myname.toTypeName)
-                mysym.sourceModule = importSymbol(x.sourceModule)
-                mysym
-*/
+            }
+            myowner.newTypeSkolemSymbol(myname.toTypeName, origin, mypos, myflags)
+          case x: from.ModuleClassSymbol =>
+            val mysym = myowner.newModuleClass(myname.toTypeName, mypos, myflags)
+            symMap(x) = mysym
+            mysym.sourceModule = importSymbol(x.sourceModule)
+            mysym
           case x: from.ClassSymbol =>
-            val mysym = new ClassSymbol(myowner, mypos, myname.toTypeName)
+            val mysym = myowner.newClassSymbol(myname.toTypeName, mypos, myflags)
+            symMap(x) = mysym
             if (sym.thisSym != sym) {
               mysym.typeOfThis = importType(sym.typeOfThis)
-              mysym.thisSym.name = importName(sym.thisSym.name)
+              mysym.thisSym setName importName(sym.thisSym.name)
             }
             mysym
           case x: from.TypeSymbol =>
-            new TypeSymbol(myowner, mypos, myname.toTypeName)
+            myowner.newTypeSymbol(myname.toTypeName, mypos, myflags)
         }
         symMap(sym) = mysym
-        mysym setFlag sym.flags | Flags.LOCKED
+        mysym setFlag Flags.LOCKED
         mysym setInfo {
-          val mytypeParams = sym.typeParams map doImport
+          val mytypeParams = sym.typeParams map importSymbol
           new LazyPolyType(mytypeParams) {
             override def complete(s: Symbol) {
               val result = sym.info match {
                 case from.PolyType(_, res) => res
                 case result => result
               }
-              s setInfo polyType(mytypeParams, importType(result))
+              s setInfo GenPolyType(mytypeParams, importType(result))
               s setAnnotations (sym.annotations map importAnnotationInfo)
             }
           }
@@ -76,7 +117,8 @@ trait Importers { self: SymbolTable =>
         mysym resetFlag Flags.LOCKED
       } // end doImport
 
-      def importOrRelink: Symbol =
+      def importOrRelink: Symbol = {
+        val sym = sym0 // makes sym visible in the debugger
         if (sym == null)
           null
         else if (sym == from.NoSymbol)
@@ -84,116 +126,164 @@ trait Importers { self: SymbolTable =>
         else if (sym.isRoot)
           definitions.RootClass
         else {
-          val myowner = importSymbol(sym.owner)
-          val myname = importName(sym.name)
-          if (sym.isModuleClass) {
-            assert(sym.sourceModule != NoSymbol, sym)
-            val mymodule = importSymbol(sym.sourceModule)
-            assert(mymodule != NoSymbol, sym)
-            assert(mymodule.moduleClass != NoSymbol, mymodule)
-            mymodule.moduleClass
-          } else if (myowner.isClass && !myowner.isRefinementClass && !(myowner hasFlag Flags.LOCKED) && sym.owner.info.decl(sym.name).exists) {
-            // symbol is in class scope, try to find equivalent one in local scope
-            if (sym.isOverloaded)
-              myowner.newOverloaded(myowner.thisType, sym.alternatives map importSymbol)
-            else {
-              var existing: Symbol = myowner.info.decl(myname)
-              if (existing.isOverloaded) {
-                existing =
-                  if (sym.isMethod) {
-                    val localCopy = doImport(sym)
-                    existing filter (_.tpe matches localCopy.tpe)
-                  } else {
-                    existing filter (!_.isMethod)
-                  }
-                assert(!existing.isOverloaded,
-                    "import failure: cannot determine unique overloaded method alternative from\n "+
-                    (existing.alternatives map (_.defString) mkString "\n")+"\n that matches "+sym+":"+sym.tpe)
+          val name = sym.name
+          val owner = sym.owner
+          var scope = if (owner.isClass && !owner.isRefinementClass) owner.info else from.NoType
+          var existing = scope.decl(name)
+          if (sym.isModuleClass)
+            existing = existing.moduleClass
+
+          if (!existing.exists) scope = from.NoType
+
+          val myname = importName(name)
+          val myowner = importSymbol(owner)
+          val myscope = if (scope != from.NoType && !(myowner hasFlag Flags.LOCKED)) myowner.info else NoType
+          var myexisting = if (myscope != NoType) myowner.info.decl(myname) else NoSymbol // cannot load myexisting in general case, because it creates cycles for methods
+          if (sym.isModuleClass)
+            myexisting = importSymbol(sym.sourceModule).moduleClass
+
+          if (!sym.isOverloaded && myexisting.isOverloaded) {
+            myexisting =
+              if (sym.isMethod) {
+                val localCopy = doImport(sym)
+                myexisting filter (_.tpe matches localCopy.tpe)
+              } else {
+                myexisting filter (!_.isMethod)
               }
-              if (existing != NoSymbol) existing
-              else {
+            assert(!myexisting.isOverloaded,
+                "import failure: cannot determine unique overloaded method alternative from\n "+
+                (myexisting.alternatives map (_.defString) mkString "\n")+"\n that matches "+sym+":"+sym.tpe)
+          }
+
+          val mysym = {
+            if (sym.isOverloaded) {
+              myowner.newOverloaded(myowner.thisType, sym.alternatives map importSymbol)
+            } else if (sym.isTypeParameter && sym.paramPos >= 0 && !(myowner hasFlag Flags.LOCKED)) {
+              assert(myowner.typeParams.length > sym.paramPos,
+                  "import failure: cannot determine parameter "+sym+" (#"+sym.paramPos+") in "+
+                  myowner+typeParamsString(myowner.rawInfo)+"\n original symbol was: "+
+                  sym.owner+from.typeParamsString(sym.owner.info))
+              myowner.typeParams(sym.paramPos)
+            } else {
+              if (myexisting != NoSymbol) {
+                myexisting
+              } else {
                 val mysym = doImport(sym)
-                assert(myowner.info.decls.lookup(myname) == NoSymbol, myname+" "+myowner.info.decl(myname)+" "+existing)
-                myowner.info.decls enter mysym
+
+                if (myscope != NoType) {
+                  assert(myowner.info.decls.lookup(myname) == NoSymbol, myname+" "+myowner.info.decl(myname)+" "+myexisting)
+                  myowner.info.decls enter mysym
+                }
+
                 mysym
               }
             }
-          } else if (sym.isTypeParameter && sym.paramPos >= 0 && !(myowner hasFlag Flags.LOCKED)) {
-            assert(myowner.typeParams.length > sym.paramPos,
-                "import failure: cannot determine parameter "+sym+" (#"+sym.paramPos+") in "+
-                myowner+typeParamsString(myowner.rawInfo)+"\n original symbol was: "+
-                sym.owner+from.typeParamsString(sym.owner.info))
-            myowner.typeParams(sym.paramPos)
-          } else
-            doImport(sym)
+          }
+
+          mysym
         }
-      symMap getOrElseUpdate (sym, importOrRelink)
+      } // end importOrRelink
+
+      val sym = sym0
+      if (symMap contains sym) {
+        symMap(sym)
+      } else {
+        pendingSyms += 1
+
+        try {
+          symMap getOrElseUpdate (sym, importOrRelink)
+        } finally {
+          pendingSyms -= 1
+          tryFixup()
+        }
+      }
     }
 
-    def importType(tpe: from.Type): Type = tpe match {
-      case from.TypeRef(pre, sym, args) =>
-        TypeRef(importType(pre), importSymbol(sym), args map importType)
-      case from.ThisType(clazz) =>
-        ThisType(importSymbol(clazz))
-      case from.SingleType(pre, sym) =>
-        SingleType(importType(pre), importSymbol(sym))
-      case from.MethodType(params, restpe) =>
-        MethodType(params map importSymbol, importType(restpe))
-      case from.PolyType(tparams, restpe) =>
-        PolyType(tparams map importSymbol, importType(restpe))
-      case from.NullaryMethodType(restpe) =>
-        NullaryMethodType(importType(restpe))
-      case from.ConstantType(from.Constant(value)) =>
-        ConstantType(Constant(value))
-      case from.SuperType(thistpe, supertpe) =>
-        SuperType(importType(thistpe), importType(supertpe))
-      case from.TypeBounds(lo, hi) =>
-        TypeBounds(importType(lo), importType(hi))
-      case from.BoundedWildcardType(bounds) =>
-        BoundedWildcardType(importTypeBounds(bounds))
-      case from.ClassInfoType(parents, decls, clazz) =>
-        val myclazz = importSymbol(clazz)
-        val myscope = if (myclazz.isPackageClass) newPackageScope(myclazz) else newScope
-        val myclazzTpe = ClassInfoType(parents map importType, myscope, myclazz)
-        myclazz setInfo polyType(myclazz.typeParams, myclazzTpe) // needed so that newly created symbols find their scope
-        decls foreach importSymbol // will enter itself into myclazz
-        myclazzTpe
-      case from.RefinedType(parents, decls) =>
-        RefinedType(parents map importType, importScope(decls), importSymbol(tpe.typeSymbol))
-      case from.ExistentialType(tparams, restpe) =>
-        newExistentialType(tparams map importSymbol, importType(restpe))
-      case from.OverloadedType(pre, alts) =>
-        OverloadedType(importType(pre), alts map importSymbol)
-      case from.AntiPolyType(pre, targs) =>
-        AntiPolyType(importType(pre), targs map importType)
-      case x: from.TypeVar =>
-        new TypeVar(importType(x.origin), importTypeConstraint(x.constr0), x.typeArgs map importType, x.params map importSymbol)
-      case from.NotNullType(tpe) =>
-        NotNullType(importType(tpe))
-      case from.AnnotatedType(annots, tpe, selfsym) =>
-        AnnotatedType(annots map importAnnotationInfo, importType(tpe), importSymbol(selfsym))
-      case from.ErrorType =>
-        ErrorType
-      case from.WildcardType =>
-        WildcardType
-      case from.NoType =>
-        NoType
-      case from.NoPrefix =>
-        NoPrefix
-      case null =>
-        null
+    def importType(tpe: from.Type): Type = {
+      def doImport(tpe: from.Type): Type = tpe match {
+        case from.TypeRef(pre, sym, args) =>
+          TypeRef(importType(pre), importSymbol(sym), args map importType)
+        case from.ThisType(clazz) =>
+          ThisType(importSymbol(clazz))
+        case from.SingleType(pre, sym) =>
+          SingleType(importType(pre), importSymbol(sym))
+        case from.MethodType(params, restpe) =>
+          MethodType(params map importSymbol, importType(restpe))
+        case from.PolyType(tparams, restpe) =>
+          PolyType(tparams map importSymbol, importType(restpe))
+        case from.NullaryMethodType(restpe) =>
+          NullaryMethodType(importType(restpe))
+        case from.ConstantType(constant @ from.Constant(_)) =>
+          ConstantType(importConstant(constant))
+        case from.SuperType(thistpe, supertpe) =>
+          SuperType(importType(thistpe), importType(supertpe))
+        case from.TypeBounds(lo, hi) =>
+          TypeBounds(importType(lo), importType(hi))
+        case from.BoundedWildcardType(bounds) =>
+          BoundedWildcardType(importTypeBounds(bounds))
+        case from.ClassInfoType(parents, decls, clazz) =>
+          val myclazz = importSymbol(clazz)
+          val myscope = if (myclazz.isPackageClass) newPackageScope(myclazz) else newScope
+          val myclazzTpe = ClassInfoType(parents map importType, myscope, myclazz)
+          myclazz setInfo GenPolyType(myclazz.typeParams, myclazzTpe) // needed so that newly created symbols find their scope
+          decls foreach importSymbol // will enter itself into myclazz
+          myclazzTpe
+        case from.RefinedType(parents, decls) =>
+          RefinedType(parents map importType, importScope(decls), importSymbol(tpe.typeSymbol))
+        case from.ExistentialType(tparams, restpe) =>
+          newExistentialType(tparams map importSymbol, importType(restpe))
+        case from.OverloadedType(pre, alts) =>
+          OverloadedType(importType(pre), alts map importSymbol)
+        case from.AntiPolyType(pre, targs) =>
+          AntiPolyType(importType(pre), targs map importType)
+        case x: from.TypeVar =>
+          TypeVar(importType(x.origin), importTypeConstraint(x.constr0), x.typeArgs map importType, x.params map importSymbol)
+        case from.NotNullType(tpe) =>
+          NotNullType(importType(tpe))
+        case from.AnnotatedType(annots, tpe, selfsym) =>
+          AnnotatedType(annots map importAnnotationInfo, importType(tpe), importSymbol(selfsym))
+        case from.ErrorType =>
+          ErrorType
+        case from.WildcardType =>
+          WildcardType
+        case from.NoType =>
+          NoType
+        case from.NoPrefix =>
+          NoPrefix
+        case null =>
+          null
+      } // end doImport
+
+      def importOrRelink: Type =
+        doImport(tpe)
+
+      if (tpeMap contains tpe) {
+        tpeMap(tpe)
+      } else {
+        pendingTpes += 1
+
+        try {
+          tpeMap getOrElseUpdate (tpe, importOrRelink)
+        } finally {
+          pendingTpes -= 1
+          tryFixup()
+        }
+      }
     }
 
     def importTypeBounds(bounds: from.TypeBounds) = importType(bounds).asInstanceOf[TypeBounds]
 
-    def importAnnotationInfo(ann: from.AnnotationInfo): AnnotationInfo =
-      AnnotationInfo(importType(ann.atp), ann.args map importTree, ann.assocs map {
-        case (name, arg) => (importName(name), importAnnotArg(arg))
-      })
+    def importAnnotationInfo(ann: from.AnnotationInfo): AnnotationInfo = {
+      val atp1 = importType(ann.atp)
+      val args1 = ann.args map importTree
+      val assocs1 = ann.assocs map { case (name, arg) => (importName(name), importAnnotArg(arg)) }
+      val original1 = importTree(ann.original)
+      AnnotationInfo(atp1, args1, assocs1) setOriginal original1
+    }
 
     def importAnnotArg(arg: from.ClassfileAnnotArg): ClassfileAnnotArg = arg match {
-      case from.LiteralAnnotArg(from.Constant(value)) =>
-        LiteralAnnotArg(Constant(value))
+      case from.LiteralAnnotArg(constant @ from.Constant(_)) =>
+        LiteralAnnotArg(importConstant(constant))
       case from.ArrayAnnotArg(args) =>
         ArrayAnnotArg(args map importAnnotArg)
       case from.ScalaSigBytes(bytes) =>
@@ -208,9 +298,9 @@ trait Importers { self: SymbolTable =>
       result
     }
 
-    // !!! todo: override to vcater for PackageScopes
+    // !!! todo: override to cater for PackageScopes
     def importScope(decls: from.Scope): Scope =
-      new Scope(decls.toList map importSymbol)
+      newScopeWith(decls.toList map importSymbol: _*)
 
     def importName(name: from.Name): Name =
       if (name.isTypeName) newTypeName(name.toString) else newTermName(name.toString)
@@ -221,7 +311,7 @@ trait Importers { self: SymbolTable =>
       new Modifiers(mods.flags, importName(mods.privateWithin), mods.annotations map importTree)
 
     def importImportSelector(sel: from.ImportSelector): ImportSelector =
-      new ImportSelector(importName(sel.name), sel.namePos, importName(sel.rename), sel.renamePos)
+      new ImportSelector(importName(sel.name), sel.namePos, if (sel.rename != null) importName(sel.rename) else null, sel.renamePos)
 
     def importTree(tree: from.Tree): Tree = {
       val mytree = tree match {
@@ -236,7 +326,7 @@ trait Importers { self: SymbolTable =>
         case from.ValDef(mods, name, tpt, rhs) =>
           new ValDef(importModifiers(mods), importName(name).toTermName, importTree(tpt), importTree(rhs))
         case from.DefDef(mods, name, tparams, vparamss, tpt, rhs) =>
-          new DefDef(importModifiers(mods), importName(name).toTermName, tparams map importTypeDef, vparamss map (_ map importValDef), importTree(tpt), importTree(rhs))
+          new DefDef(importModifiers(mods), importName(name).toTermName, tparams map importTypeDef, mmap(vparamss)(importValDef), importTree(tpt), importTree(rhs))
         case from.TypeDef(mods, name, tparams, rhs) =>
           new TypeDef(importModifiers(mods), importName(name).toTypeName, tparams map importTypeDef, importTree(rhs))
         case from.LabelDef(name, params, rhs) =>
@@ -263,6 +353,8 @@ trait Importers { self: SymbolTable =>
           new Function(vparams map importValDef, importTree(body))
         case from.Assign(lhs, rhs) =>
           new Assign(importTree(lhs), importTree(rhs))
+        case from.AssignOrNamedArg(lhs, rhs) =>
+          new AssignOrNamedArg(importTree(lhs), importTree(rhs))
         case from.If(cond, thenp, elsep) =>
           new If(importTree(cond), importTree(thenp), importTree(elsep))
         case from.Match(selector, cases) =>
@@ -284,6 +376,8 @@ trait Importers { self: SymbolTable =>
             new ApplyToImplicitArgs(importTree(fun), args map importTree)
           case _: from.ApplyImplicitView =>
             new ApplyImplicitView(importTree(fun), args map importTree)
+          case _: from.ApplyConstructor =>
+            new ApplyConstructor(importTree(fun), args map importTree)
           case _ =>
             new Apply(importTree(fun), args map importTree)
         }
@@ -295,14 +389,12 @@ trait Importers { self: SymbolTable =>
           new This(importName(qual).toTypeName)
         case from.Select(qual, name) =>
           new Select(importTree(qual), importName(name))
-        case from.Ident(name) => tree match {
-          case _: from.BackQuotedIdent =>
-            new BackQuotedIdent(importName(name))
-          case _ =>
-            new Ident(importName(name))
-        }
-        case from.Literal(from.Constant(value)) =>
-          new Literal(Constant(value))
+        case from.Ident(name) =>
+          new Ident(importName(name))
+        case from.ReferenceToBoxed(ident) =>
+          new ReferenceToBoxed(importTree(ident) match { case ident: Ident => ident })
+        case from.Literal(constant @ from.Constant(_)) =>
+          new Literal(importConstant(constant))
         case from.TypeTree() =>
           new TypeTree()
         case from.Annotated(annot, arg) =>
@@ -324,10 +416,24 @@ trait Importers { self: SymbolTable =>
         case null =>
           null
       }
-      if (mytree != null) {
-        if (mytree hasSymbol) mytree.symbol = importSymbol(tree.symbol)
-        mytree.tpe = importType(tree.tpe)
-      }
+      addFixup({
+        if (mytree != null) {
+          val mysym = if (tree hasSymbol) importSymbol(tree.symbol) else NoSymbol
+          val mytpe = importType(tree.tpe)
+
+          mytree match {
+            case mytt: TypeTree =>
+              val tt = tree.asInstanceOf[from.TypeTree]
+              if (mytree hasSymbol) mytt.symbol = mysym
+              if (tt.wasEmpty) mytt.defineType(mytpe) else mytt.setType(mytpe)
+              if (tt.original != null) mytt.setOriginal(importTree(tt.original))
+            case _ =>
+              if (mytree hasSymbol) mytree.symbol = importSymbol(tree.symbol)
+              mytree.tpe = importType(tree.tpe)
+          }
+        }
+      })
+      tryFixup()
       mytree
     }
 
@@ -337,5 +443,10 @@ trait Importers { self: SymbolTable =>
     def importRefTree(tree: from.RefTree): RefTree = importTree(tree).asInstanceOf[RefTree]
     def importIdent(tree: from.Ident): Ident = importTree(tree).asInstanceOf[Ident]
     def importCaseDef(tree: from.CaseDef): CaseDef = importTree(tree).asInstanceOf[CaseDef]
+    def importConstant(constant: from.Constant): Constant = new Constant(constant.tag match {
+      case ClazzTag => importType(constant.value.asInstanceOf[from.Type])
+      case EnumTag => importSymbol(constant.value.asInstanceOf[from.Symbol])
+      case _ => constant.value
+    })
   }
 }

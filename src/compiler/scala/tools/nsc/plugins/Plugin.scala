@@ -13,12 +13,12 @@ import java.util.zip.ZipException
 
 import scala.collection.mutable
 import mutable.ListBuffer
-/*@XML*/
+/*@XML
 import scala.xml.XML
-/*XML@*/
-/*@NOXML
+XML@*/
+/*@NOXML*/
 import scala.tools.util.XML
-XMLNO@*/
+/*XMLNO@*/
 
 /** Information about a plugin loaded from a jar file.
  *
@@ -143,7 +143,7 @@ object Plugin {
     } yield entry)).distinct
 
     val loader = loaderFor(alljars)
-    alljars map (loadFrom(_, loader)) flatten
+    (alljars map (loadFrom(_, loader))).flatten
   }
 
   /** Instantiate a plugin class, given the class and

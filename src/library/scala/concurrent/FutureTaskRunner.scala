@@ -8,11 +8,14 @@
 
 package scala.concurrent
 
+import language.{implicitConversions, higherKinds}
+
 /** The `FutureTaskRunner</code> trait is a base trait of task runners
  *  that provide some sort of future abstraction.
  *
  *  @author Philipp Haller
  */
+@deprecated("Use `ExecutionContext`s instead.", "2.10.0")
 trait FutureTaskRunner extends TaskRunner {
 
   /** The type of the futures that the underlying task runner supports.

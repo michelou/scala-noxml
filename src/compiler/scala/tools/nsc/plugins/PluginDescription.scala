@@ -6,13 +6,13 @@
 package scala.tools.nsc
 package plugins
 
-/*@XML*/
+/*@XML
 import scala.xml.{Node,NodeSeq}
-/*XML@*/
-/*@NOXML
+XML@*/
+/*@NOXML*/
 import org.w3c.dom.{Node, Document, Text}
 import scala.tools.util.XML
-XMLNO@*/
+/*XMLNO@*/
 
 /** A description of a compiler plugin, suitable for serialization
  *  to XML for inclusion in the plugin's .jar file.
@@ -35,15 +35,15 @@ abstract class PluginDescription {
    *  read back using <code>PluginDescription.fromXML</code>.
    *  It should be stored inside the jar archive file.
    */
-/*@XML*/ // NB. This code DOES rely on Scala native XML support.
+/*@XML // NB. This code DOES rely on Scala native XML support.
   def toXML: Node = {
     <plugin>
       <name>{name}</name>
       <classname>{classname}</classname>
     </plugin>
   }
-/*XML@*/
-/*@NOXML // NB. This code DOES NOT rely on Scala native XML support.
+XML@*/
+/*@NOXML*/ // NB. This code DOES NOT rely on Scala native XML support.
   def toXML: Node = pluginDoc
 
   private lazy val pluginDoc: Node = {
@@ -62,7 +62,7 @@ abstract class PluginDescription {
 
     root
   }
-XMLNO@*/
+/*XMLNO@*/
 }
 
 /** Utilities for the PluginDescription class.
@@ -74,13 +74,13 @@ object PluginDescription {
 
   def fromXML(xml: Node): Option[PluginDescription] = {
     // check the top-level tag
-/*@XML*/
+/*@XML
     xml match {
       case <plugin>{_*}</plugin>  => ()
       case _ => return None
     }
-/*XML@*/
-/*@NOXML
+XML@*/
+/*@NOXML*/
     val node = xml match {
       case root: Document => root.getDocumentElement
       case node => node
@@ -99,7 +99,7 @@ object PluginDescription {
       }
     }
     implicit def nodeWrapper(node: Node) = new RichNode(node)
-XMLNO@*/
+/*XMLNO@*/
     // extract one field
     def getField(field: String): Option[String] = {
       val text = (xml \\ field).text.trim

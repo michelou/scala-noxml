@@ -11,6 +11,7 @@ import java.io.{
   BufferedInputStream, BufferedOutputStream, RandomAccessFile }
 import java.net.{ URI, URL }
 import scala.util.Random.alphanumeric
+import language.implicitConversions
 
 /** An abstraction for filesystem paths.  The differences between
  *  Path, File, and Directory are primarily to communicate intent.
@@ -48,7 +49,7 @@ object Path {
   implicit def jfile2path(jfile: JFile): Path = apply(jfile)
 
   // java 7 style, we don't use it yet
-  // object AccessMode extends Enumeration("AccessMode") {
+  // object AccessMode extends Enumeration {
   //   val EXECUTE, READ, WRITE = Value
   // }
   // def checkAccess(modes: AccessMode*): Boolean = {

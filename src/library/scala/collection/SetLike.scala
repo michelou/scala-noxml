@@ -12,7 +12,6 @@ package scala.collection
 import generic._
 import mutable.{ Builder, SetBuilder }
 import annotation.{migration, bridge}
-/*@PAR*/
 import parallel.ParSet
 /*PAR@*/
 
@@ -131,9 +130,6 @@ self =>
    */
   def ++ (elems: GenTraversableOnce[A]): This = (repr /: elems.seq)(_ + _)
 
-  @bridge
-  def ++ (elems: TraversableOnce[A]): This = ++ (elems: GenTraversableOnce[A])
-
   /** Creates a new set with a given element removed from this set.
    *
    *  @param elem the element to be removed
@@ -156,9 +152,6 @@ self =>
    */
   def union(that: GenSet[A]): This = this ++ that
 
-  @bridge
-  def union(that: Set[A]): This = union(that: GenSet[A])
-
   /** Computes the difference of this set and another set.
    *
    *  @param that the set of elements to exclude.
@@ -166,9 +159,6 @@ self =>
    *              set that are not also contained in the given set `that`.
    */
   def diff(that: GenSet[A]): This = this -- that
-
-  @bridge
-  def diff(that: Set[A]): This = diff(that: GenSet[A])
 
   /** An iterator over all subsets of this set of the given size.
    *  If the requested size is impossible, an empty iterator is returned.

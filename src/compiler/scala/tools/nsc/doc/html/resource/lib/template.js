@@ -2,30 +2,60 @@
 // code by Gilles Dubochet with contributions by Pedro Furlanetto
 
 $(document).ready(function(){
-    var isHiddenClass;
-    if (document.title == 'scala.AnyRef') {
-        isHiddenClass = function (name) {
-            return name == 'scala.Any';
-        };
-    } else {
-        isHiddenClass = function (name) {
-            return name == 'scala.Any' || name == 'scala.AnyRef';
-        };
-    }
+    var isHiddenClass = function (name) {
+        return name == 'scala.Any' ||
+               name == 'scala.AnyRef' ||
+               name == 'scala.Predef.any2stringfmt' ||
+               name == 'scala.Predef.any2stringadd' ||
+               name == 'scala.Predef.any2ArrowAssoc' ||
+               name == 'scala.Predef.any2Ensuring'
+    };
 
-    $("#linearization li").filter(function(){
+    $("#linearization li:gt(0)").filter(function(){
         return isHiddenClass($(this).attr("name"));
     }).removeClass("in").addClass("out");
-    
+
+    $("#implicits li").filter(function(){
+        return isHiddenClass($(this).attr("name"));
+    }).removeClass("in").addClass("out");
+
     // Pre-filter members
     filter();
 
     // Member filter box
     var input = $("#textfilter input");
     input.bind("keyup", function(event) {
-        if (event.keyCode == 27)
-            input.val(""); // escape key
-        filter(true);
+
+        switch ( event.keyCode ) {
+
+        case 27: // escape key
+            input.val("");
+            filter(true);
+            break;
+
+        case 38: // up
+            input.val("");
+            filter(false);
+            window.scrollTo(0, $("body").offset().top);
+            input.focus();
+            break;
+
+        case 33: //page up
+            input.val("");
+            filter(false);            
+            break;
+
+        case 34: //page down
+            input.val("");
+            filter(false);            
+            break;            
+
+        default: 
+            window.scrollTo(0, $("#mbrsel").offset().top);
+            filter(true);        
+            break;
+
+        }        
     });
     input.focus(function(event) {
         input.select();
@@ -35,13 +65,13 @@ $(document).ready(function(){
         filter();
     });
     $(document).keydown(function(event) {
-        if(!event.altKey && !event.ctrlKey &&
-           (event.keyCode == 27 || (event.keyCode >= 48 && event.keyCode <= 90)) &&
-           document.activeElement != $("#textfilter input")[0]) {
-               $("#textfilter input").focus();
+
+        if (event.keyCode == 9) { // tab
+            $("#index-input", window.parent.document).focus();
+            input.attr("value", "");
+            return false;            
         }
     });
-    $("#textfilter input").focus();
 
     $("#linearization li").click(function(){
         if ($(this).hasClass("in")) {
@@ -54,17 +84,38 @@ $(document).ready(function(){
         };
         filter();
     });
-    $("#ancestors > ol > li.hideall").click(function() {
+
+    $("#implicits li").click(function(){
+        if ($(this).hasClass("in")) {
+            $(this).removeClass("in");
+            $(this).addClass("out");
+        }
+        else if ($(this).hasClass("out")) {
+            $(this).removeClass("out");
+            $(this).addClass("in");
+        };
+        filter();
+    });
+
+    $("#mbrsel > div[id=ancestors] > ol > li.hideall").click(function() {
         $("#linearization li.in").removeClass("in").addClass("out");
         $("#linearization li:first").removeClass("out").addClass("in");
+        $("#implicits li.in").removeClass("in").addClass("out");
         filter();
     })
-    $("#ancestors > ol > li.showall").click(function() {
-        var filtered =
+    $("#mbrsel > div[id=ancestors] > ol > li.showall").click(function() {
+        var filteredLinearization =
             $("#linearization li.out").filter(function() {
                 return ! isHiddenClass($(this).attr("name"));
             });
-        filtered.removeClass("out").addClass("in");
+        filteredLinearization.removeClass("out").addClass("in");
+
+        var filteredImplicits =
+        $("#implicits li.out").filter(function() {
+            return ! isHiddenClass($(this).attr("name"));
+        });
+        filteredImplicits.removeClass("out").addClass("in");
+
         filter();
     });
     $("#visbl > ol > li.public").click(function() {
@@ -108,8 +159,10 @@ $(document).ready(function(){
     });
 
     /* Add toggle arrows */
-    var docAllSigs = $("#template li").has(".fullcomment").find(".signature");
-    
+    //var docAllSigs = $("#template li").has(".fullcomment").find(".signature");
+    // trying to speed things up a little bit
+    var docAllSigs = $("#template li[fullComment=yes] .signature");
+
     function commentToggleFct(signature){
         var parent = signature.parent();
         var shortComment = $(".shortcomment", parent);
@@ -129,7 +182,7 @@ $(document).ready(function(){
     docAllSigs.click(function() {
         commentToggleFct($(this));
     });
-    
+
     /* Linear super types and known subclasses */
     function toggleShowContentFct(outerElement){
       var content = $(".hiddenContent", outerElement);
@@ -148,20 +201,22 @@ $(document).ready(function(){
     $(".toggleContainer").click(function() {
       toggleShowContentFct($(this));
     });
-    
+
     // Set parent window title
     windowTitle();
 });
 
 function orderAlpha() {
     $("#template > div.parent").hide();
-    $("#ancestors").show();
+    $("#template > div.conversion").hide();
+    $("#mbrsel > div[id=ancestors]").show();
     filter();
 };
 
 function orderInherit() {
     $("#template > div.parent").show();
-    $("#ancestors").hide();
+    $("#template > div.conversion").show();
+    $("#mbrsel > div[id=ancestors]").hide();
     filter();
 };
 
@@ -175,6 +230,9 @@ function initInherit() {
     // parents is a map from fully-qualified names to the DOM node of parent headings.
     var parents = new Object();
     $("#inheritedMembers > div.parent").each(function(){
+        parents[$(this).attr("name")] = $(this);
+    });
+    $("#inheritedMembers > div.conversion").each(function(){
         parents[$(this).attr("name")] = $(this);
     });
     $("#types > ol > li").each(function(){
@@ -216,21 +274,29 @@ function initInherit() {
     $("#inheritedMembers > div.parent").each(function() {
         if ($("> div.members", this).length == 0) { $(this).remove(); };
     });
+    $("#inheritedMembers > div.conversion").each(function() {
+        if ($("> div.members", this).length == 0) { $(this).remove(); };
+    });
 };
 
-function filter(scrollToMember) {
+/* filter used to take boolean scrollToMember */
+function filter() {
     var query = $.trim($("#textfilter input").val()).toLowerCase();
     query = query.replace(/[-[\]{}()*+?.,\\^$|#]/g, "\\$&").replace(/\s+/g, "|");
     var queryRegExp = new RegExp(query, "i");
     var privateMembersHidden = $("#visbl > ol > li.public").hasClass("in");
     var orderingAlphabetic = $("#order > ol > li.alpha").hasClass("in");
-    var hiddenSuperclassElements = orderingAlphabetic ? $("#linearization > li.out") : $("#linearization > li:gt(0)");
-    var hiddenSuperclasses = hiddenSuperclassElements.map(function() {
+    var hiddenSuperclassElementsLinearization = orderingAlphabetic ? $("#linearization > li.out") : $("#linearization > li:gt(0)");
+    var hiddenSuperclassesLinearization = hiddenSuperclassElementsLinearization.map(function() {
+      return $(this).attr("name");
+    }).get();
+    var hiddenSuperclassElementsImplicits = orderingAlphabetic ? $("#implicits > li.out") : $("#implicits > li");
+    var hiddenSuperclassesImplicits = hiddenSuperclassElementsImplicits.map(function() {
       return $(this).attr("name");
     }).get();
 
     var hideInheritedMembers;
-    
+
     if(orderingAlphabetic) {
       $("#inheritedMembers").hide();
       hideInheritedMembers = true;
@@ -242,9 +308,10 @@ function filter(scrollToMember) {
       $("#allMembers > .members").each(filterFunc);
       hideInheritedMembers = false;
       $("#inheritedMembers > .parent > .members").each(filterFunc);
+      $("#inheritedMembers > .conversion > .members").each(filterFunc);
     }
 
-    
+
     function filterFunc() {
       var membersVisible = false;
       var members = $(this);
@@ -262,12 +329,18 @@ function filter(scrollToMember) {
             ownerIndex = name.lastIndexOf(".");
           }
           var owner = name.slice(0, ownerIndex);
-          for (var i = 0; i < hiddenSuperclasses.length; i++) {
-            if (hiddenSuperclasses[i] == owner) {
+          for (var i = 0; i < hiddenSuperclassesLinearization.length; i++) {
+            if (hiddenSuperclassesLinearization[i] == owner) {
               mbr.hide();
               return;
             }
-          }
+          };
+          for (var i = 0; i < hiddenSuperclassesImplicits.length; i++) {
+            if (hiddenSuperclassesImplicits[i] == owner) {
+              mbr.hide();
+              return;
+            }
+          };
         }
         if (query && !(queryRegExp.test(name) || queryRegExp.test(this.mbrText))) {
           mbr.hide();
@@ -276,16 +349,12 @@ function filter(scrollToMember) {
         mbr.show();
         membersVisible = true;
       });
-      
+
       if (membersVisible)
         members.show();
       else
         members.hide();
     };
-
-    if (scrollToMember) {
-      window.scrollTo(0, $("#mbrsel").offset().top);
-    }
 
     return false;
 };

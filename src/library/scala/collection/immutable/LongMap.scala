@@ -36,7 +36,7 @@ import LongMapUtils._
 
 /** A companion object for long maps.
  *
- *  @define Coll  LongMap
+ *  @define Coll  `LongMap`
  *  @define mapCanBuildFromInfo
  *    The standard `CanBuildFrom` instance for `$Coll` objects.
  *    The created value is an instance of class `MapCanBuildFrom`.
@@ -147,7 +147,7 @@ import LongMap._;
  *  @tparam T      type of the values associated with the long keys.
  *
  *  @since 2.7
- *  @define Coll immutable.LongMap
+ *  @define Coll `immutable.LongMap`
  *  @define coll immutable long integer map
  *  @define mayNotTerminateInf
  *  @define willNotTerminateInf
@@ -349,19 +349,19 @@ extends AbstractMap[Long, T]
   def unionWith[S >: T](that : LongMap[S], f : (Long, S, S) => S) : LongMap[S] = (this, that) match{
     case (LongMap.Bin(p1, m1, l1, r1), that@(LongMap.Bin(p2, m2, l2, r2))) =>
       if (shorter(m1, m2)) {
-        if (!hasMatch(p2, p1, m1)) join(p1, this, p2, that);
+        if (!hasMatch(p2, p1, m1)) join[S](p1, this, p2, that); // TODO: remove [S] when SI-5548 is fixed
         else if (zero(p2, m1)) LongMap.Bin(p1, m1, l1.unionWith(that, f), r1);
         else LongMap.Bin(p1, m1, l1, r1.unionWith(that, f));
       } else if (shorter(m2, m1)){
-        if (!hasMatch(p1, p2, m2)) join(p1, this, p2, that);
+        if (!hasMatch(p1, p2, m2)) join[S](p1, this, p2, that); // TODO: remove [S] when SI-5548 is fixed
         else if (zero(p1, m2)) LongMap.Bin(p2, m2, this.unionWith(l2, f), r2);
         else LongMap.Bin(p2, m2, l2, this.unionWith(r2, f));
       }
       else {
         if (p1 == p2) LongMap.Bin(p1, m1, l1.unionWith(l2,f), r1.unionWith(r2, f));
-        else join(p1, this, p2, that);
+        else join[S](p1, this, p2, that); // TODO: remove [S] when SI-5548 is fixed
       }
-    case (LongMap.Tip(key, value), x) => x.updateWith(key, value, (x, y) => f(key, y, x));
+    case (LongMap.Tip(key, value), x) => x.updateWith[S](key, value, (x, y) => f(key, y, x)); // TODO: remove [S] when SI-5548 is fixed
     case (x, LongMap.Tip(key, value)) => x.updateWith[S](key, value, (x, y) => f(key, x, y));
     case (LongMap.Nil, x) => x;
     case (x, LongMap.Nil) => x;

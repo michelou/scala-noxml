@@ -12,6 +12,7 @@ package scala.math
 import java.{ lang => jl }
 import java.math.{ MathContext, BigDecimal => BigDec }
 import scala.collection.immutable.NumericRange
+import language.implicitConversions
 
 
 /**
@@ -33,8 +34,10 @@ object BigDecimal {
   /** Cache ony for defaultMathContext using BigDecimals in a small range. */
   private lazy val cache = new Array[BigDecimal](maxCached - minCached + 1)
 
-  object RoundingMode extends Enumeration(java.math.RoundingMode.values map (_.toString) : _*) with Serializable {
+  object RoundingMode extends Enumeration {
     type RoundingMode = Value
+    // These are supposed to be the same as java.math.RoundingMode.values,
+    // though it seems unwise to rely on the correspondence.
     val UP, DOWN, CEILING, FLOOR, HALF_UP, HALF_DOWN, HALF_EVEN, UNNECESSARY = Value
   }
 
@@ -181,7 +184,8 @@ extends ScalaNumber with ScalaNumericConversions with Serializable {
   override def equals (that: Any): Boolean = that match {
     case that: BigDecimal     => this equals that
     case that: BigInt         => this.toBigIntExact exists (that equals _)
-    case _: Float | _: Double => unifiedPrimitiveEquals(that)
+    case that: Double         => isValidDouble && toDouble == that
+    case that: Float          => isValidFloat && toFloat == that
     case _                    => isValidLong && unifiedPrimitiveEquals(that)
   }
   override def isValidByte  = noArithmeticException(toByteExact)
@@ -189,6 +193,18 @@ extends ScalaNumber with ScalaNumericConversions with Serializable {
   override def isValidChar  = isValidInt && toIntExact >= Char.MinValue && toIntExact <= Char.MaxValue
   override def isValidInt   = noArithmeticException(toIntExact)
   def isValidLong  = noArithmeticException(toLongExact)
+  /** Returns `true` iff this can be represented exactly by [[scala.Float]]; otherwise returns `false`.
+    */
+  def isValidFloat = {
+    val f = toFloat
+    !f.isInfinity && bigDecimal.compareTo(new java.math.BigDecimal(f)) == 0
+  }
+  /** Returns `true` iff this can be represented exactly by [[scala.Double]]; otherwise returns `false`.
+    */
+  def isValidDouble = {
+    val d = toDouble
+    !d.isInfinity && bigDecimal.compareTo(new java.math.BigDecimal(d)) == 0
+  }
 
   private def noArithmeticException(body: => Unit): Boolean = {
     try   { body ; true }
@@ -277,7 +293,7 @@ extends ScalaNumber with ScalaNumericConversions with Serializable {
 
   /** Returns the absolute value of this BigDecimal
    */
-  def abs: BigDecimal = this.bigDecimal abs
+  def abs: BigDecimal = this.bigDecimal.abs
 
   /** Returns the sign of this BigDecimal, i.e.
    *   -1 if it is less than 0,

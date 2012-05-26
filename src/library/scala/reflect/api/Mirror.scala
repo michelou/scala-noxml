@@ -3,53 +3,74 @@ package api
 
 /** A mirror establishes connections of
  *  runtime entities such as class names and object instances
- *  with a refexive universe.
+ *  with a reflexive universe.
  */
-trait Mirror extends Universe with RuntimeTypes with TreeBuildUtil {
+trait Mirror extends Universe {
+
+  /** Class loader that is a mastermind behind the reflexive mirror.
+   *
+   *  By default it is set to system classloader (more precisely, to the classloader that loads the `scala.reflect.package` class).
+   *  However, sometimes it is useful to have a mirror services by a custom classloader.
+   *
+   *  There are two ways to customize the `classLoader`:
+   *    1) Create a new mirror using the `scala.reflect.mkMirror(classLoader: ClassLoader)` method
+   *    2) Set `classLoader` to the new value
+   *
+   *  The first, immutable, way should be strongly preferred in most situation.
+   *  However sometimes it is necessary to migrate the default reflexive mirror (`scala.reflect.mirror`) to a new classloader.
+   *  In that and only that case, use the setter, but be very careful not to introduce inconsistencies.
+   */
+  var classLoader: ClassLoader
 
   /** The Scala class symbol that has given fully qualified name
    *  @param name  The fully qualified name of the class to be returned
-   *  @throws java.lang.ClassNotFoundException if no class wiht that name exists
+   *  @throws java.lang.ClassNotFoundException if no class with that name exists
    *  to do: throws anything else?
    */
-  def classWithName(name: String): Symbol
+  def symbolForName(name: String): Symbol
 
-  /** The Scala class symbol corresponding to the runtime class of given object
-   *  @param  The object from which the class is returned
+  /** Return a reference to the companion object of the given class symbol.
+   */
+  def companionInstance(clazz: Symbol): AnyRef
+
+  /** The Scala class symbol corresponding to the runtime class of the given instance.
+   *  @param    instance    The instance
+   *  @return               The class Symbol for the instance
    *  @throws ?
    */
-  def getClass(obj: AnyRef): Symbol
+  def symbolOfInstance(instance: Any): Symbol
 
-  /** The Scala type corresponding to the runtime type of given object.
+  /** The Scala type corresponding to the runtime type of given instance.
    *  If the underlying class is parameterized, this will be an existential type,
    *  with unknown type arguments.
    *
-   *  @param  The object from which the type is returned
+   *  @param    instance    The instance.
+   *  @return               The Type of the given instance.
    *  @throws ?
    */
-  def getType(obj: AnyRef): Type
+  def typeOfInstance(instance: Any): Type
 
   /** The value of a field on a receiver instance.
    *  @param receiver   The receiver instance
    *  @param field      The field
    *  @return           The value contained in `receiver.field`.
    */
-  def getValue(receiver: AnyRef, field: Symbol): Any
+  def getValueOfField(receiver: AnyRef, field: Symbol): Any
 
   /** Sets the value of a field on a receiver instance.
    *  @param receiver   The receiver instance
    *  @param field      The field
    *  @param value      The new value to be stored in the field.
    */
-  def setValue(receiver: AnyRef, field: Symbol, value: Any): Unit
+  def setValueOfField(receiver: AnyRef, field: Symbol, value: Any): Unit
 
-  /** Invokes a method on a reciver instance with some arguments
+  /** Invokes a method on a receiver instance with some arguments
    *  @param receiver   The receiver instance
    *  @param meth       The method
    *  @param args       The method call's arguments
    *  @return   The result of invoking `receiver.meth(args)`
    */
-  def invoke(receiver: AnyRef, meth: Symbol, args: Any*): Any
+  def invoke(receiver: AnyRef, meth: Symbol)(args: Any*): Any
 
   /** Maps a Java class to a Scala type reference
    *  @param   clazz    The Java class object

@@ -6,7 +6,6 @@ trait Types { self: Universe =>
   /** This class declares operations that are visible in a Type.
    */
   abstract class AbsType {
-
     /** The type symbol associated with the type, or `NoSymbol` for types
      *  that do not refer to a type symbol.
      */
@@ -20,7 +19,7 @@ trait Types { self: Universe =>
 
     /** The collection of declarations in this type
      */
-    def allDeclarations: Iterable[Symbol]
+    def declarations: Iterable[Symbol]
 
     /** The member with given name, either directly declared or inherited,
      *  an OverloadedSymbol if several exist, NoSymbol if none exist.
@@ -36,7 +35,7 @@ trait Types { self: Universe =>
      *  Members appear in the linearization order of their owners.
      *  Members with the same owner appear in reverse order of their declarations.
      */
-    def allMembers: Iterable[Symbol]
+    def members: Iterable[Symbol]
 
     /** An iterable containing all non-private members of this type (directly declared or inherited)
      *  Members appear in the linearization order of their owners.
@@ -47,16 +46,32 @@ trait Types { self: Universe =>
     /** Substitute types in `to` for corresponding occurrences of references to
      *  symbols `from` in this type.
      */
-    def subst(from: List[Symbol], to: List[Type]): Type
+    def substituteTypes(from: List[Symbol], to: List[Type]): Type
 
     /** If this is a parameterized types, the type arguments.
      *  Otherwise the empty list
      */
     def typeArguments: List[Type]
 
+    /** For a (potentially wrapped) poly type, its type parameters,
+     *  the empty list for all other types */
+    def typeParams: List[Symbol]
+
     /** Is this type a type constructor that is missing its type arguments?
      */
-    def isHigherKinded: Boolean
+    def isHigherKinded: Boolean   // !!! This should be called "isTypeConstructor", no?
+
+    /** Returns the corresponding type constructor (e.g. List for List[T] or List[String])
+     */
+    def typeConstructor: Type
+
+    /** Does this type refer to spliceable types or is a spliceable type?
+     */
+    def isConcrete: Boolean
+
+    /** Is this type an abstract type that needs to be resolved?
+     */
+    def isSpliceable: Boolean
 
     /**
      *  Expands type aliases and converts higher-kinded TypeRefs to PolyTypes.
@@ -66,7 +81,7 @@ trait Types { self: Universe =>
      *    TypeRef(pre, <List>, List()) is replaced by
      *    PolyType(X, TypeRef(pre, <List>, List(X)))
      */
-    def normalize: Type
+    def normalize: Type     // !!! Alternative name? "normalize" is used to mean too many things.
 
     /** Does this type conform to given type argument `that`? */
     def <:< (that: Type): Boolean
@@ -74,11 +89,11 @@ trait Types { self: Universe =>
     /** Is this type equivalent to given type argument `that`? */
     def =:= (that: Type): Boolean
 
-    /** The list of all baseclasses of this type (including its own typeSymbol)
+    /** The list of all base classes of this type (including its own typeSymbol)
      *  in reverse linearization order, starting with the class itself and ending
      *  in class Any.
      */
-    def baseClasses: List[Symbol]
+    def baseClasses: List[Symbol]   // !!! Alternative name, perhaps linearization?
 
     /** The least type instance of given class which is a supertype
      *  of this type.  Example:
@@ -96,17 +111,20 @@ trait Types { self: Universe =>
      *  Proceed analogously for thistypes referring to outer classes.
      *
      *  Example:
+     *  {{{
      *    class D[T] { def m: T }
      *    class C extends p.D[Int]
      *    T.asSeenFrom(ThisType(C), D)  (where D is owner of m)
      *      = Int
+     *  }}} 
      */
     def asSeenFrom(pre: Type, clazz: Symbol): Type
 
     /** The erased type corresponding to this type after
-     *  all transcformations from Scala to Java have been performed.
+     *  all transformations from Scala to Java have been performed.
      */
-    def erasedType: Type
+    def erasure: Type    // !!! "erasedType", compare with "widen" (so "erase") or "underlying" (so "erased")
+                         // why not name it "erasure"?
 
    /** Apply `f` to each part of this type, returning
     *  a new type. children get mapped before their parents */
@@ -125,37 +143,55 @@ trait Types { self: Universe =>
 
     /** Does this type contain a reference to given symbol? */
     def contains(sym: Symbol): Boolean
-  }
 
-  /** This class declares methods that are visible in a `SingleType`.
-   */
-  trait AbsSingletonType extends AbsType {
+    /** If this is a compound type, the list of its parent types;
+     *  otherwise the empty list
+     */
+    def parents: List[Type]
 
-    /** The type underlying a singleton type */
+    /** If this is a singleton type, returns the type underlying it;
+     *  otherwise returns this type itself.
+     */
     def underlying: Type
 
-    /** Widen from singleton type to its underlying non-singleton
-     *  base type by applying one or more `underlying` dereferences,
-     *  identity for all other types.
+    /** If this is a singleton type, widen it to its nearest underlying non-singleton
+     *  base type by applying one or more `underlying` dereferences.
+     *  If this is not a singleton type, returns this type itself.
+     *
+     *  Example:
      *
      *  class Outer { class C ; val x: C }
      *  val o: Outer
      *  <o.x.type>.widen = o.C
      */
     def widen: Type
+
+    /** The kind of this type; used for debugging */
+    def kind: String
   }
 
-  /** This class declares methods that are visible in a `CompoundType` (i.e.
-   *  a class/trait/object template or refined type of the form
-   *  {{{
-   *     P_1 with ... with P_m { D_1; ...; D_n }
-   *  }}}
-   *  P_n
+  /** An object representing an unknown type, used during type inference.
+   *  If you see WildcardType outside of inference it is almost certainly a bug.
    */
-  trait AbsCompoundType extends AbsType {
+  val WildcardType: Type
 
-    /** The list of parent types of this compound type */
-    def parents: List[Type]
+  /** BoundedWildcardTypes, used only during type inference, are created in
+   *  two places that I can find:
+   *
+   *    1. If the expected type of an expression is an existential type,
+   *       its hidden symbols are replaced with bounded wildcards.
+   *    2. When an implicit conversion is being sought based in part on
+   *       the name of a method in the converted type, a HasMethodMatching
+   *       type is created: a MethodType with parameters typed as
+   *       BoundedWildcardTypes.
+   */
+  type BoundedWildcardType >: Null <: Type
+
+  val BoundedWildcardType: BoundedWildcardTypeExtractor
+
+  abstract class BoundedWildcardTypeExtractor {
+    def apply(bounds: TypeBounds): BoundedWildcardType
+    def unapply(tpe: BoundedWildcardType): Option[TypeBounds]
   }
 
   /** The type of Scala types, and also Scala type signatures.
@@ -235,6 +271,7 @@ trait Types { self: Universe =>
    *     (T # x).type             SingleType(T, x)
    *     p.x.type                 SingleType(p.type, x)
    *     x.type                   SingleType(NoPrefix, x)
+   *  }}}
    */
   type SingleType <: SingletonType
 
@@ -293,7 +330,7 @@ trait Types { self: Universe =>
 
   /** A subtype of Type representing refined types as well as `ClassInfo` signatures.
    */
-  type CompoundType <: /*AbsCompoundType with*/ Type
+  type CompoundType <: Type
 
   /** The `RefinedType` type defines types of any of the forms on the left,
    *  with their RefinedType representations to the right.
@@ -409,11 +446,6 @@ trait Types { self: Universe =>
     def unapply(tpe: ClassInfoType): Option[(List[Type], Scope, Symbol)]
   }
 
-
-
-
-
-
   abstract class NullaryMethodTypeExtractor {
     def apply(resultType: Type): NullaryMethodType
     def unapply(tpe: NullaryMethodType): Option[(Type)]
@@ -434,10 +466,69 @@ trait Types { self: Universe =>
     def unapply(tpe: AnnotatedType): Option[(List[AnnotationInfo], Type, Symbol)]
   }
 
-  /** The least upper bound wrt <:< of a list of types */
+  /** The least upper bound of a list of types, as determined by `<:<`.  */
   def lub(xs: List[Type]): Type
 
-    /** The greatest lower bound wrt <:< of a list of types */
+    /** The greatest lower bound of a list of types, as determined by `<:<`. */
   def glb(ts: List[Type]): Type
+
+  // Creators ---------------------------------------------------------------
+  // too useful and too non-trivial to be left out of public API
+  // [Eugene to Paul] needs review!
+
+  /** The canonical creator for single-types */
+  def singleType(pre: Type, sym: Symbol): Type
+
+  /** the canonical creator for a refined type with a given scope */
+  def refinedType(parents: List[Type], owner: Symbol, decls: Scope, pos: Position): Type
+
+  /** The canonical creator for a refined type with an initially empty scope.
+   */
+  def refinedType(parents: List[Type], owner: Symbol): Type
+
+  /** The canonical creator for typerefs
+   */
+  def typeRef(pre: Type, sym: Symbol, args: List[Type]): Type
+
+  /** A creator for intersection type where intersections of a single type are
+   *  replaced by the type itself. */
+  def intersectionType(tps: List[Type]): Type
+
+  /** A creator for intersection type where intersections of a single type are
+   *  replaced by the type itself, and repeated parent classes are merged.
+   *
+   *  !!! Repeated parent classes are not merged - is this a bug in the
+   *  comment or in the code?
+   */
+  def intersectionType(tps: List[Type], owner: Symbol): Type
+
+  /** A creator for type applications */
+  def appliedType(tycon: Type, args: List[Type]): Type
+
+  /** A creator for type parameterizations that strips empty type parameter lists.
+   *  Use this factory method to indicate the type has kind * (it's a polymorphic value)
+   *  until we start tracking explicit kinds equivalent to typeFun (except that the latter requires tparams nonEmpty).
+   */
+  def polyType(tparams: List[Symbol], tpe: Type): Type
+
+  /** A creator for existential types. This generates:
+   *
+   *  {{{
+   *    tpe1 where { tparams }
+   *  }}}
+   *
+   *  where `tpe1` is the result of extrapolating `tpe` with regard to `tparams`.
+   *  Extrapolating means that type variables in `tparams` occurring
+   *  in covariant positions are replaced by upper bounds, (minus any
+   *  SingletonClass markers), type variables in `tparams` occurring in
+   *  contravariant positions are replaced by upper bounds, provided the
+   *  resulting type is legal with regard to stability, and does not contain
+   *  any type variable in `tparams`.
+   *
+   *  The abstraction drops all type parameters that are not directly or
+   *  indirectly referenced by type `tpe1`. If there are no remaining type
+   *  parameters, simply returns result type `tpe`.
+   */
+  def existentialAbstraction(tparams: List[Symbol], tpe0: Type): Type
 }
 

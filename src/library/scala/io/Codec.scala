@@ -11,6 +11,7 @@ package scala.io
 
 import java.nio.charset.{ Charset, CharsetDecoder, CharsetEncoder, CharacterCodingException, CodingErrorAction => Action }
 import annotation.migration
+import language.implicitConversions
 
 // Some notes about encodings for use in refining this implementation.
 //
@@ -37,6 +38,9 @@ class Codec(val charSet: Charset) {
   private[this] var _encodingReplacement: Array[Byte] = null
   private[this] var _decodingReplacement: String      = null
   private[this] var _onCodingException: Handler       = e => throw e
+
+  /** The name of the Codec. */
+  override def toString = name
 
   // these methods can be chained to configure the variables above
   def onMalformedInput(newAction: Action): this.type = { _onMalformedInput = newAction ; this }
@@ -110,7 +114,15 @@ object Codec extends LowPriorityCodecImplicits {
 
   @migration("This method was previously misnamed `fromUTF8`. Converts from character sequence to Array[Byte].", "2.9.0")
   def toUTF8(cs: CharSequence): Array[Byte] = {
-    val cbuffer = java.nio.CharBuffer wrap cs
+    val cbuffer = java.nio.CharBuffer.wrap(cs, 0, cs.length)
+    val bbuffer = UTF8.charSet encode cbuffer
+    val bytes = new Array[Byte](bbuffer.remaining())
+    bbuffer get bytes
+
+    bytes
+  }
+  def toUTF8(chars: Array[Char], offset: Int, len: Int): Array[Byte] = {
+    val cbuffer = java.nio.CharBuffer.wrap(chars, offset, len)
     val bbuffer = UTF8.charSet encode cbuffer
     val bytes = new Array[Byte](bbuffer.remaining())
     bbuffer get bytes

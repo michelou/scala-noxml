@@ -20,7 +20,7 @@ import mutable.{ Builder, SetBuilder }
  *  @see [[http://docs.scala-lang.org/overviews/collections/concrete-immutable-collection-classes.html#immutable_bitsets "Scala's Collection Library overview"]]
  *  section on `Immutable BitSets` for more information.
  *
- *  @define Coll immutable.BitSet
+ *  @define Coll `immutable.BitSet`
  *  @define coll immutable bitset
  */
 @SerialVersionUID(1611436763290191562L)
@@ -63,7 +63,7 @@ abstract class BitSet extends scala.collection.AbstractSet[Int]
 }
 
 /** $factoryInfo
- *  @define Coll immutable.BitSet
+ *  @define Coll `immutable.BitSet`
  *  @define coll immutable bitset
  */
 object BitSet extends BitSetFactory[BitSet] {
@@ -131,7 +131,7 @@ object BitSet extends BitSetFactory[BitSet] {
    *  the capacity of two long values). The constructor wraps an existing
    *  bit mask without copying, thus exposing a mutable part of the internal
    *  implementation. Care needs to be taken not to modify the exposed
-   *  array.  
+   *  array.
    */
   class BitSetN(val elems: Array[Long]) extends BitSet {
     protected def nwords = elems.length

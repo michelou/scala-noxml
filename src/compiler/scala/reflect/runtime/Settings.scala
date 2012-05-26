@@ -23,14 +23,16 @@ class Settings extends internal.settings.MutableSettings {
 
   val overrideObjects = new BooleanSetting(false)
   val debug = new BooleanSetting(false)
-  // val YdepMethTpes = new BooleanSetting(true)
   val Ynotnull = new BooleanSetting(false)
   val explaintypes = new BooleanSetting(false)
   val verbose = new BooleanSetting(false)
   val uniqid = new BooleanSetting(false)
+  val Yshowsymkinds = new BooleanSetting(false)
   val Xprintpos = new BooleanSetting(false)
   val printtypes = new BooleanSetting(false)
   val Yrecursion = new IntSetting(0)
   val maxClassfileName = new IntSetting(255)
   val Xexperimental = new BooleanSetting(false)
+  val deepCloning = new BooleanSetting (false)
+  val XoldPatmat = new BooleanSetting(false)
 }

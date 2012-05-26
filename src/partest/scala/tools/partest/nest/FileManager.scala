@@ -60,6 +60,9 @@ trait FileManager extends FileUtil {
 
   var CLASSPATH: String
   var LATEST_LIB: String
+  var LATEST_COMP: String
+  var LATEST_PARTEST: String
+  var LATEST_ACTORS: String
 
   var showDiff = false
   var updateCheck = false

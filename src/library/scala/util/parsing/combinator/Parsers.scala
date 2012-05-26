@@ -12,6 +12,8 @@ import scala.util.parsing.input._
 import scala.collection.mutable.ListBuffer
 import scala.annotation.tailrec
 import annotation.migration
+import language.implicitConversions
+import scala.util.DynamicVariable
 
 // TODO: better error handling (labelling like parsec's <?>)
 
@@ -153,13 +155,14 @@ trait Parsers {
     val successful = true
   }
 
-  var lastNoSuccess: NoSuccess = null
+  private lazy val lastNoSuccess = new DynamicVariable[Option[NoSuccess]](None)
 
   /** A common super-class for unsuccessful parse results. */
   sealed abstract class NoSuccess(val msg: String, override val next: Input) extends ParseResult[Nothing] { // when we don't care about the difference between Failure and Error
     val successful = false
-    if (!(lastNoSuccess != null && next.pos < lastNoSuccess.next.pos))
-      lastNoSuccess = this
+
+    if (lastNoSuccess.value map { v => !(next.pos < v.next.pos) } getOrElse true)
+      lastNoSuccess.value = Some(this)
 
     def map[U](f: Nothing => U) = this
     def mapPartial[U](f: PartialFunction[Nothing, U], error: Nothing => String): ParseResult[U] = this
@@ -487,7 +490,7 @@ trait Parsers {
     }
 
     /** Changes the error message produced by a parser.
-     * 
+     *
      *  This doesn't change the behavior of a parser on neither
      *  success nor failure, just on error. The semantics are
      *  slightly different than those obtained by doing `| error(msg)`,
@@ -595,7 +598,8 @@ trait Parsers {
    *  @return        A parser for elements satisfying p(e).
    */
   def acceptIf(p: Elem => Boolean)(err: Elem => String): Parser[Elem] = Parser { in =>
-    if (p(in.first)) Success(in.first, in.rest)
+    if (in.atEnd) Failure("end of input", in)
+    else if (p(in.first)) Success(in.first, in.rest)
     else Failure(err(in.first), in)
   }
 
@@ -613,7 +617,8 @@ trait Parsers {
    *          applying `f` to it to produce the result.
    */
   def acceptMatch[U](expected: String, f: PartialFunction[Elem, U]): Parser[U] = Parser{ in =>
-    if (f.isDefinedAt(in.first)) Success(f(in.first), in.rest)
+    if (in.atEnd) Failure("end of input", in)
+    else if (f.isDefinedAt(in.first)) Success(f(in.first), in.rest)
     else Failure(expected+" expected", in)
   }
 
@@ -794,7 +799,7 @@ trait Parsers {
    */
   def chainl1[T, U](first: => Parser[T], p: => Parser[U], q: => Parser[(T, U) => T]): Parser[T]
     = first ~ rep(q ~ p) ^^ {
-        case x ~ xs => xs.foldLeft(x){(_, _) match {case (a, f ~ b) => f(a, b)}}
+        case x ~ xs => xs.foldLeft(x: T){case (a, f ~ b) => f(a, b)} // x's type annotation is needed to deal with changed type inference due to SI-5189
       }
 
   /** A parser generator that generalises the `rep1sep` generator so that `q`,
@@ -812,8 +817,7 @@ trait Parsers {
    */
   def chainr1[T, U](p: => Parser[T], q: => Parser[(T, U) => U], combine: (T, U) => U, first: U): Parser[U]
     = p ~ rep(q ~ p) ^^ {
-        case x ~ xs => (new ~(combine, x) :: xs).
-                            foldRight(first){(_, _) match {case (f ~ a, b) => f(a, b)}}
+        case x ~ xs => (new ~(combine, x) :: xs).foldRight(first){case (f ~ a, b) => f(a, b)}
       }
 
   /** A parser generator for optional sub-phrases.
@@ -877,16 +881,15 @@ trait Parsers {
    *           if `p` consumed all the input.
    */
   def phrase[T](p: Parser[T]) = new Parser[T] {
-    lastNoSuccess = null
-    def apply(in: Input) = p(in) match {
+    def apply(in: Input) = lastNoSuccess.withValue(None) {
+      p(in) match {
       case s @ Success(out, in1) =>
         if (in1.atEnd)
           s
-        else if (lastNoSuccess == null || lastNoSuccess.next.pos < in1.pos)
-          Failure("end of input expected", in1)
         else
-          lastNoSuccess
-      case _ => lastNoSuccess
+            lastNoSuccess.value filterNot { _.next.pos < in1.pos } getOrElse Failure("end of input expected", in1)
+        case ns => lastNoSuccess.value.getOrElse(ns)
+      }
     }
   }
 

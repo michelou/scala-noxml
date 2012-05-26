@@ -9,6 +9,7 @@ package ast
 
 import PartialFunction._
 import symtab.Flags
+import language.implicitConversions
 
 /** A DSL for generating scala code.  The goal is that the
  *  code generating code should look a lot like the code it
@@ -43,6 +44,11 @@ trait TreeDSL {
     val ZERO          = LIT(0)
     def NULL          = LIT(null)
     def UNIT          = LIT(())
+
+    // for those preferring boring, predictable lives, without the thrills of tree-sharing
+    // (but with the perk of typed trees)
+    def TRUE_typed  = LIT(true) setType ConstantType(Constant(true))
+    def FALSE_typed = LIT(false) setType ConstantType(Constant(false))
 
     object WILD {
       def empty               = Ident(nme.WILDCARD)
@@ -89,6 +95,12 @@ trait TreeDSL {
       def INT_>=  (other: Tree)     = fn(target, getMember(IntClass, nme.GE), other)
       def INT_==  (other: Tree)     = fn(target, getMember(IntClass, nme.EQ), other)
       def INT_!=  (other: Tree)     = fn(target, getMember(IntClass, nme.NE), other)
+      
+      // generic operations on ByteClass, IntClass, LongClass
+      def GEN_|   (other: Tree, kind: ClassSymbol)  = fn(target, getMember(kind, nme.OR), other)
+      def GEN_&   (other: Tree, kind: ClassSymbol)  = fn(target, getMember(kind, nme.AND), other)
+      def GEN_==  (other: Tree, kind: ClassSymbol)  = fn(target, getMember(kind, nme.EQ), other)
+      def GEN_!=  (other: Tree, kind: ClassSymbol)  = fn(target, getMember(kind, nme.NE), other)
 
       def BOOL_&& (other: Tree)     = fn(target, Boolean_and, other)
       def BOOL_|| (other: Tree)     = fn(target, Boolean_or, other)
@@ -202,7 +214,7 @@ trait TreeDSL {
     class DefSymStart(val sym: Symbol) extends SymVODDStart with DefCreator {
       def symType  = sym.tpe.finalResultType
       def tparams  = sym.typeParams map TypeDef
-      def vparamss = sym.paramss map (xs => xs map ValDef)
+      def vparamss = mapParamss(sym)(ValDef)
     }
     class ValSymStart(val sym: Symbol) extends SymVODDStart with ValCreator {
       def symType = sym.tpe
@@ -253,13 +265,11 @@ trait TreeDSL {
     }
 
     /** Top level accessible. */
-    def MATCHERROR(arg: Tree) = Throw(New(TypeTree(MatchErrorClass.tpe), List(List(arg))))
-    /** !!! should generalize null guard from match error here. */
-    def THROW(sym: Symbol): Throw = Throw(New(TypeTree(sym.tpe), List(Nil)))
-    def THROW(sym: Symbol, msg: Tree): Throw = Throw(New(TypeTree(sym.tpe), List(List(msg.TOSTRING()))))
+    def MATCHERROR(arg: Tree) = Throw(MatchErrorClass.tpe, arg)
+    def THROW(sym: Symbol, msg: Tree): Throw = Throw(sym.tpe, msg.TOSTRING())
 
     def NEW(tpt: Tree, args: Tree*): Tree   = New(tpt, List(args.toList))
-    def NEW(sym: Symbol, args: Tree*): Tree = New(sym, args: _*)
+    def NEW(sym: Symbol, args: Tree*): Tree = New(sym.tpe, args: _*)
 
     def DEF(name: Name, tp: Type): DefTreeStart     = DEF(name) withType tp
     def DEF(name: Name): DefTreeStart               = new DefTreeStart(name)
@@ -289,7 +299,7 @@ trait TreeDSL {
     def TRY(tree: Tree)   = new TryStart(tree, Nil, EmptyTree)
     def BLOCK(xs: Tree*)  = Block(xs.init.toList, xs.last)
     def NOT(tree: Tree)   = Select(tree, Boolean_not)
-    def SOME(xs: Tree*)   = Apply(SomeModule, makeTupleTerm(xs.toList, true))
+    def SOME(xs: Tree*)   = Apply(SomeClass.companionSymbol, makeTupleTerm(xs.toList, true))
 
     /** Typed trees from symbols. */
     def THIS(sym: Symbol)             = gen.mkAttributedThis(sym)

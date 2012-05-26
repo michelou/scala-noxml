@@ -3,13 +3,13 @@
  * @author  Martin Odersky
  */
 
-
 package scala.tools.nsc
 package backend
 package icode
 
 import java.io.PrintWriter
 import scala.collection.{ mutable, immutable }
+import util.{ SourceFile, NoSourceFile }
 import symtab.Flags.{ DEFERRED }
 
 trait ReferenceEquality {
@@ -17,29 +17,34 @@ trait ReferenceEquality {
   override def equals(that: Any) = this eq that.asInstanceOf[AnyRef]
 }
 
-trait Members { self: ICodes =>
+trait Members {
+  self: ICodes =>
+
   import global._
+
+  object NoCode extends Code(null, "NoCode") {
+    override def blocksList: List[BasicBlock] = Nil
+  }
 
   /**
    * This class represents the intermediate code of a method or
    * other multi-block piece of code, like exception handlers.
    */
-  class Code(method: IMethod) {
-    private[this] val name = method.symbol.decodedName.toString.intern
+  class Code(method: IMethod, name: String) {
+    def this(method: IMethod) = this(method, method.symbol.decodedName.toString.intern)
     /** The set of all blocks */
     val blocks = mutable.ListBuffer[BasicBlock]()
 
     /** The start block of the method */
-    var startBlock: BasicBlock = null
-
-    /** The stack produced by this method */
-    var producedStack: TypeStack = null
+    var startBlock: BasicBlock = NoBasicBlock
 
     private var currentLabel: Int = 0
     private var _touched = false
 
-    def blockCount       = blocks.size
-    def instructionCount = blocks map (_.length) sum
+    def blocksList: List[BasicBlock] = blocks.toList
+    def instructions                 = blocksList flatMap (_.iterator)
+    def blockCount                   = blocks.size
+    def instructionCount             = (blocks map (_.length)).sum
 
     def touched = _touched
     def touched_=(b: Boolean): Unit = {
@@ -82,7 +87,7 @@ trait Members { self: ICodes =>
 
     /* Create a new block and append it to the list
      */
-    def newBlock: BasicBlock = {
+    def newBlock(): BasicBlock = {
       touched = true
       val block = new BasicBlock(nextLabel, method);
       blocks += block;
@@ -134,6 +139,8 @@ trait Members { self: ICodes =>
   /** Represent a field in ICode */
   class IField(val symbol: Symbol) extends IMember { }
 
+  object NoIMethod extends IMethod(NoSymbol) { }
+
   /**
    * Represents a method in ICode. Local variables contain
    * both locals and parameters, similar to the way the JVM
@@ -145,14 +152,23 @@ trait Members { self: ICodes =>
    * finished (GenICode does that).
    */
   class IMethod(val symbol: Symbol) extends IMember {
-    var code: Code = null
+    var code: Code = NoCode
+
+    def newBlock() = code.newBlock
+    def startBlock = code.startBlock
+    def lastBlock  = blocks.last
+    def blocks = code.blocksList
+    def linearizedBlocks(lin: Linearizer = self.linearizer): List[BasicBlock] = lin linearize this
+
+    def foreachBlock[U](f: BasicBlock  => U): Unit = blocks foreach f
+    def foreachInstr[U](f: Instruction => U): Unit = foreachBlock(_.toList foreach f)
+
     var native = false
 
     /** The list of exception handlers, ordered from innermost to outermost. */
     var exh: List[ExceptionHandler] = Nil
-    var sourceFile: String = _
+    var sourceFile: SourceFile = NoSourceFile
     var returnType: TypeKind = _
-
     var recursive: Boolean = false
 
     /** local variables and method parameters */
@@ -161,18 +177,13 @@ trait Members { self: ICodes =>
     /** method parameters */
     var params: List[Local] = Nil
 
-    def hasCode = code != null
+    def hasCode = code ne NoCode
     def setCode(code: Code): IMethod = {
       this.code = code;
       this
     }
 
-    def addLocal(l: Local): Local =
-      locals find (_ == l) getOrElse {
-        locals ::= l
-        l
-      }
-
+    def addLocal(l: Local): Local = findOrElse(locals)(_ == l) { locals ::= l ; l }
 
     def addParam(p: Local): Unit =
       if (params contains p) ()
@@ -197,14 +208,22 @@ trait Members { self: ICodes =>
 
     override def toString() = symbol.fullName
 
+    def matchesSignature(other: IMethod) = {
+      (symbol.name == other.symbol.name) &&
+      (params corresponds other.params)(_.kind == _.kind) &&
+      (returnType == other.returnType)
+    }
+
     import opcodes._
     def checkLocals(): Unit = {
-      def localsSet = code.blocks.flatten collect {
-        case LOAD_LOCAL(l)  => l
-        case STORE_LOCAL(l) => l
-      } toSet
+      def localsSet = (code.blocks flatMap { bb =>
+        bb.iterator collect {
+          case LOAD_LOCAL(l)  => l
+          case STORE_LOCAL(l) => l
+        }
+      }).toSet
 
-      if (code != null) {
+      if (hasCode) {
         log("[checking locals of " + this + "]")
         locals filterNot localsSet foreach { l =>
           log("Local " + l + " is not declared in " + this)
@@ -218,7 +237,7 @@ trait Members { self: ICodes =>
      *
      * This method should be most effective after heavy inlining.
      */
-    def normalize(): Unit = if (this.code ne null) {
+    def normalize(): Unit = if (this.hasCode) {
       val nextBlock: mutable.Map[BasicBlock, BasicBlock] = mutable.HashMap.empty
       for (b <- code.blocks.toList
         if b.successors.length == 1;

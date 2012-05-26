@@ -6,7 +6,6 @@
 **                          |/                                          **
 \*                                                                      */
 
-import annotation.bridge
 
 /**
  * Core Scala types. They are always available without an explicit import.
@@ -27,6 +26,12 @@ package object scala {
   type NoSuchElementException          = java.util.NoSuchElementException
   type NumberFormatException           = java.lang.NumberFormatException
   type AbstractMethodError             = java.lang.AbstractMethodError
+  type InterruptedException            = java.lang.InterruptedException
+
+  // A dummy used by the specialization annotation.
+  val AnyRef = new Specializable {
+    override def toString = "object AnyRef"
+  }
 
   @deprecated("instead of `@serializable class C`, use `class C extends Serializable`", "2.9.0")
   type serializable = annotation.serializable
@@ -58,6 +63,9 @@ package object scala {
   type ::[A] = scala.collection.immutable.::[A]
   val :: = scala.collection.immutable.::
 
+  val +: = scala.collection.+:
+  val :+ = scala.collection.:+
+
   type Stream[+A] = scala.collection.immutable.Stream[A]
   val Stream = scala.collection.immutable.Stream
   val #:: = scala.collection.immutable.Stream.#::
@@ -70,17 +78,6 @@ package object scala {
 
   type Range = scala.collection.immutable.Range
   val Range = scala.collection.immutable.Range
-
-  // Migrated from Predef
-  @deprecated("Use Thread.currentThread instead", "2.9.0")
-  def currentThread = java.lang.Thread.currentThread()
-
-  /*@XML*/
-  // Moved back into Predef to avoid unnecessary indirection by
-  // way of the scala package object within the standard library,
-  // but bridged for compatibility.
-  @bridge def $scope = scala.xml.TopScope
-  /*XML@*/
 
   // Numeric types which were moved into scala.math.*
 
@@ -125,13 +122,4 @@ package object scala {
   type unchecked = annotation.unchecked.unchecked
   type volatile = annotation.volatile
   */
-
-  @deprecated("use scala.annotation.Annotation instead", "2.9.0")
-  type Annotation = scala.annotation.Annotation
-  @deprecated("use scala.annotation.ClassfileAnnotation instead", "2.9.0")
-  type ClassfileAnnotation = scala.annotation.ClassfileAnnotation
-  @deprecated("use scala.annotation.StaticAnnotation instead", "2.9.0")
-  type StaticAnnotation = scala.annotation.StaticAnnotation
-  @deprecated("use scala.annotation.TypeConstraint instead", "2.9.0")
-  type TypeConstraint = scala.annotation.TypeConstraint
 }

@@ -13,6 +13,7 @@ package mutable
 
 import generic._
 import immutable.{List, Nil, ::}
+import java.io._
 
 /** A `Buffer` implementation back up by a list. It provides constant time
  *  prepend and append. Most other operations are linear.
@@ -26,7 +27,7 @@ import immutable.{List, Nil, ::}
  *
  *  @tparam A    the type of this list buffer's elements.
  *
- *  @define Coll ListBuffer
+ *  @define Coll `ListBuffer`
  *  @define coll list buffer
  *  @define thatinfo the class of the returned collection. In the standard library configuration,
  *    `That` is always `ListBuffer[B]` because an implicit of type `CanBuildFrom[ListBuffer, B, ListBuffer[B]]`
@@ -40,7 +41,7 @@ import immutable.{List, Nil, ::}
  *  @define mayNotTerminateInf
  *  @define willNotTerminateInf
  */
-@SerialVersionUID(3419063961353022661L)
+@SerialVersionUID(3419063961353022662L)
 final class ListBuffer[A]
       extends AbstractBuffer[A]
          with Buffer[A]
@@ -53,6 +54,7 @@ final class ListBuffer[A]
   override def companion: GenericCompanion[ListBuffer] = ListBuffer
 
   import scala.collection.Traversable
+  import scala.collection.immutable.ListSerializeEnd
 
   private var start: List[A] = Nil
   private var last0: ::[A] = _
@@ -60,6 +62,48 @@ final class ListBuffer[A]
   private var len = 0
 
   protected def underlying: immutable.Seq[A] = start
+
+  private def writeObject(out: ObjectOutputStream) {
+    // write start
+    var xs: List[A] = start
+    while (!xs.isEmpty) { out.writeObject(xs.head); xs = xs.tail }
+    out.writeObject(ListSerializeEnd)
+
+    // no need to write last0
+
+    // write if exported
+    out.writeBoolean(exported)
+
+    // write the length
+    out.writeInt(len)
+  }
+
+  private def readObject(in: ObjectInputStream) {
+    // read start, set last0 appropriately
+    var elem: A = in.readObject.asInstanceOf[A]
+    if (elem == ListSerializeEnd) {
+      start = Nil
+      last0 = null
+    } else {
+      var current = new ::(elem, Nil)
+      start = current
+      elem = in.readObject.asInstanceOf[A]
+      while (elem != ListSerializeEnd) {
+        val list = new ::(elem, Nil)
+        current.tl = list
+        current = list
+        elem = in.readObject.asInstanceOf[A]
+      }
+      last0 = current
+      start
+    }
+
+    // read if exported
+    exported = in.readBoolean()
+
+    // read the length
+    len = in.readInt()
+  }
 
   /** The current length of the buffer.
    *
@@ -131,10 +175,10 @@ final class ListBuffer[A]
   }
 
   override def ++=(xs: TraversableOnce[A]): this.type =
-    if (xs eq this) ++= (this take size) else super.++=(xs)
+    if (xs.asInstanceOf[AnyRef] eq this) ++= (this take size) else super.++=(xs)
 
   override def ++=:(xs: TraversableOnce[A]): this.type =
-    if (xs eq this) ++=: (this take size) else super.++=:(xs)
+    if (xs.asInstanceOf[AnyRef] eq this) ++=: (this take size) else super.++=:(xs)
 
   /** Clears the buffer contents.
    */
@@ -164,7 +208,7 @@ final class ListBuffer[A]
    *  one. Instead, it will insert a new element at index `n`.
    *
    *  @param  n     the index where a new element will be inserted.
-   *  @param  iter  the iterable object providing all elements to insert.
+   *  @param  seq   the iterable object providing all elements to insert.
    *  @throws Predef.IndexOutOfBoundsException if `n` is out of bounds.
    */
   def insertAll(n: Int, seq: Traversable[A]) {
@@ -294,8 +338,8 @@ final class ListBuffer[A]
   /** Remove a single element from this buffer. May take time linear in the
    *  buffer size.
    *
-   *  @param x  the element to remove.
-   *  @return   this $coll.
+   *  @param elem  the element to remove.
+   *  @return      this $coll.
    */
   override def -= (elem: A): this.type = {
     if (exported) copy()
@@ -355,7 +399,7 @@ final class ListBuffer[A]
   private def copy() {
     var cursor = start
     val limit = last0.tail
-    clear
+    clear()
     while (cursor ne limit) {
       this += cursor.head
       cursor = cursor.tail
@@ -381,7 +425,7 @@ final class ListBuffer[A]
 }
 
 /** $factoryInfo
- *  @define Coll ListBuffer
+ *  @define Coll `ListBuffer`
  *  @define coll list buffer
  */
 object ListBuffer extends SeqFactory[ListBuffer] {

@@ -90,7 +90,7 @@ class Scalac extends ScalaMatchingTask with ScalacShared {
 
   /** Defines valid values for properties that refer to compiler phases. */
   object CompilerPhase extends PermissibleValue {
-    val values = List("namer", "typer", "pickler", "refchecks", "liftcode",
+    val values = List("namer", "typer", "pickler", "refchecks",
                       "uncurry", "tailcalls", "specialize", "explicitouter",
                       "erasure", "lazyvals", "lambdalift", "constructors",
                       "flatten", "mixin", "cleanup", "icode", "inliner",
@@ -608,7 +608,7 @@ class Scalac extends ScalaMatchingTask with ScalacShared {
     if (!deprecation.isEmpty) settings.deprecation.value = deprecation.get
     if (!nobootcp.isEmpty) settings.nobootcp.value = nobootcp.get
     if (!nowarn.isEmpty) settings.nowarn.value = nowarn.get
-    if (!optimise.isEmpty) settings.XO.value = optimise.get
+    if (!optimise.isEmpty) settings.optimise.value = optimise.get
     if (!unchecked.isEmpty) settings.unchecked.value = unchecked.get
     if (!usejavacp.isEmpty) settings.usejavacp.value = usejavacp.get
 

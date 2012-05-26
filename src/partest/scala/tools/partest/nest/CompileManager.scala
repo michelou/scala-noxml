@@ -12,10 +12,26 @@ import scala.tools.nsc.{ Global, Settings, CompilerCommand, FatalError, io }
 import scala.tools.nsc.interactive.RangePositions
 import scala.tools.nsc.reporters.{ Reporter, ConsoleReporter }
 import scala.tools.nsc.util.{ ClassPath, FakePos }
+import scala.tools.nsc.Properties.{ setProp, propOrEmpty }
 import scala.tools.util.PathResolver
 import io.Path
 import java.io.{ File, BufferedReader, PrintWriter, FileReader, Writer, FileWriter, StringWriter }
 import File.pathSeparator
+
+sealed abstract class CompilationOutcome {
+  def merge(other: CompilationOutcome): CompilationOutcome
+  def isPositive = this eq CompileSuccess
+  def isNegative = this eq CompileFailed
+}
+case object CompileSuccess extends CompilationOutcome {
+  def merge(other: CompilationOutcome) = other
+}
+case object CompileFailed extends CompilationOutcome {
+  def merge(other: CompilationOutcome) = if (other eq CompileSuccess) this else other
+}
+case object CompilerCrashed extends CompilationOutcome {
+  def merge(other: CompilationOutcome) = this
+}
 
 class ExtConsoleReporter(settings: Settings, val writer: PrintWriter) extends ConsoleReporter(settings, Console.in, writer) {
   shortname = true
@@ -26,12 +42,12 @@ class TestSettings(cp: String, error: String => Unit) extends Settings(error) {
 
   deprecation.value = true
   nowarnings.value  = false
-  encoding.value    = "ISO-8859-1"
+  encoding.value    = "UTF-8"
   classpath.value   = cp
 }
 
 abstract class SimpleCompiler {
-  def compile(out: Option[File], files: List[File], kind: String, log: File): Boolean
+  def compile(out: Option[File], files: List[File], kind: String, log: File): CompilationOutcome
 }
 
 class DirectCompiler(val fileManager: FileManager) extends SimpleCompiler {
@@ -67,7 +83,7 @@ class DirectCompiler(val fileManager: FileManager) extends SimpleCompiler {
     (opt2 ::: pluginOption) mkString " "
   }
 
-  def compile(out: Option[File], files: List[File], kind: String, log: File): Boolean = {
+  def compile(out: Option[File], files: List[File], kind: String, log: File): CompilationOutcome = {
     val testSettings = out match {
       case Some(f)  => newSettings(f.getAbsolutePath)
       case _        => newSettings()
@@ -111,10 +127,13 @@ class DirectCompiler(val fileManager: FileManager) extends SimpleCompiler {
 
     try {
       NestUI.verbose("compiling "+toCompile)
+      NestUI.verbose("with classpath: "+global.classPath.toString)
+      NestUI.verbose("and java classpath: "+ propOrEmpty("java.class.path"))
       try new global.Run compile toCompile
       catch {
         case FatalError(msg) =>
           testRep.error(null, "fatal error: " + msg)
+          return CompilerCrashed
       }
 
       testRep.printSummary()
@@ -122,81 +141,13 @@ class DirectCompiler(val fileManager: FileManager) extends SimpleCompiler {
     }
     finally logWriter.close()
 
-    !testRep.hasErrors
+    if (testRep.hasErrors) CompileFailed
+    else CompileSuccess
   }
 }
 
-// class ReflectiveCompiler(val fileManager: ConsoleFileManager) extends SimpleCompiler {
-//   import fileManager.{latestCompFile, latestPartestFile}
-//
-//   val sepUrls = Array(latestCompFile.toURI.toURL, latestPartestFile.toURI.toURL)
-//   //NestUI.verbose("constructing URLClassLoader from URLs "+latestCompFile+" and "+latestPartestFile)
-//
-//   val sepLoader = new java.net.URLClassLoader(sepUrls, null)
-//
-//   val sepCompilerClass =
-//     sepLoader.loadClass("scala.tools.partest.nest.DirectCompiler")
-//   val sepCompiler = sepCompilerClass.newInstance()
-//
-//   // needed for reflective invocation
-//   val fileClass = Class.forName("java.io.File")
-//   val stringClass = Class.forName("java.lang.String")
-//   val sepCompileMethod =
-//     sepCompilerClass.getMethod("compile", fileClass, stringClass)
-//   val sepCompileMethod2 =
-//     sepCompilerClass.getMethod("compile", fileClass, stringClass, fileClass)
-//
-//   /* This method throws java.lang.reflect.InvocationTargetException
-//    * if the compiler crashes.
-//    * This exception is handled in the shouldCompile and shouldFailCompile
-//    * methods of class CompileManager.
-//    */
-//   def compile(out: Option[File], files: List[File], kind: String, log: File): Boolean = {
-//     val res = sepCompileMethod2.invoke(sepCompiler, out, files, kind, log).asInstanceOf[java.lang.Boolean]
-//     res.booleanValue()
-//   }
-// }
-
 class CompileManager(val fileManager: FileManager) {
-  var compiler: SimpleCompiler = new DirectCompiler(fileManager)
-
-  var numSeparateCompilers = 1
-  def createSeparateCompiler() = {
-    numSeparateCompilers += 1
-    compiler = new /*ReflectiveCompiler*/ DirectCompiler(fileManager)
-  }
-
-  /* This method returns true iff compilation succeeds.
-   */
-  def shouldCompile(files: List[File], kind: String, log: File): Boolean = {
-    createSeparateCompiler()
-    compiler.compile(None, files, kind, log)
-  }
-
-  /* This method returns true iff compilation succeeds.
-   */
-  def shouldCompile(out: File, files: List[File], kind: String, log: File): Boolean = {
-    createSeparateCompiler()
-    compiler.compile(Some(out), files, kind, log)
-  }
-
-  /* This method returns true iff compilation fails
-   * _and_ the compiler does _not_ crash or loop.
-   *
-   * If the compiler crashes, this method returns false.
-   */
-  def shouldFailCompile(files: List[File], kind: String, log: File): Boolean = {
-    createSeparateCompiler()
-    !compiler.compile(None, files, kind, log)
-  }
-
-  /* This method returns true iff compilation fails
-   * _and_ the compiler does _not_ crash or loop.
-   *
-   * If the compiler crashes, this method returns false.
-   */
-  def shouldFailCompile(out: File, files: List[File], kind: String, log: File): Boolean = {
-    createSeparateCompiler()
-    !compiler.compile(Some(out), files, kind, log)
-  }
+  private def newCompiler = new DirectCompiler(fileManager)
+  def attemptCompile(outdir: Option[File], sources: List[File], kind: String, log: File): CompilationOutcome =
+    newCompiler.compile(outdir, sources, kind, log)
 }

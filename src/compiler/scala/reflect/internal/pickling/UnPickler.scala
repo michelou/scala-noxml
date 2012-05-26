@@ -184,6 +184,8 @@ abstract class UnPickler /*extends reflect.generic.UnPickler*/ {
         case _ => errorBadSignature("bad name tag: " + tag)
       }
     }
+    protected def readTermName(): TermName = readName().toTermName
+    protected def readTypeName(): TypeName = readName().toTypeName
 
     /** Read a symbol */
     protected def readSymbol(): Symbol = {
@@ -211,7 +213,7 @@ abstract class UnPickler /*extends reflect.generic.UnPickler*/ {
             return NoSymbol
 
           if (tag == EXTMODCLASSref) {
-            val moduleVar = owner.info.decl(nme.moduleVarName(name))
+            val moduleVar = owner.info.decl(nme.moduleVarName(name.toTermName))
             if (moduleVar.isLazyAccessor)
               return moduleVar.lazyAccessor.lazyAccessor
           }
@@ -223,10 +225,11 @@ abstract class UnPickler /*extends reflect.generic.UnPickler*/ {
           // (2) Try with expanded name.  Can happen if references to private
           // symbols are read from outside: for instance when checking the children
           // of a class.  See #1722.
-          fromName(nme.expandedName(name, owner)) orElse {
+          fromName(nme.expandedName(name.toTermName, owner)) orElse {
             // (3) Try as a nested object symbol.
             nestedObjectSymbol orElse {
               // (4) Otherwise, fail.
+              //System.err.println("missing "+name+" in "+owner+"/"+owner.id+" "+owner.info.decls)
               adjust(errorMissingRequirement(name, owner))
             }
           }
@@ -254,12 +257,11 @@ abstract class UnPickler /*extends reflect.generic.UnPickler*/ {
         }
 
       def isModuleFlag = (flags & MODULE) != 0L
-      def isMethodFlag = (flags & METHOD) != 0L
       def isClassRoot  = (name == classRoot.name) && (owner == classRoot.owner)
       def isModuleRoot = (name == moduleRoot.name) && (owner == moduleRoot.owner)
+      def pflags       = flags & PickledFlags
 
       def finishSym(sym: Symbol): Symbol = {
-        sym.flags         = flags & PickledFlags
         sym.privateWithin = privateWithin
         sym.info = (
           if (atEnd) {
@@ -279,31 +281,27 @@ abstract class UnPickler /*extends reflect.generic.UnPickler*/ {
       }
 
       finishSym(tag match {
-        case TYPEsym  => owner.newAbstractType(name.toTypeName)
-        case ALIASsym => owner.newAliasType(name.toTypeName)
+        case TYPEsym  | ALIASsym =>
+          owner.newNonClassSymbol(name.toTypeName, NoPosition, pflags)
         case CLASSsym =>
-          val sym = (isClassRoot, isModuleFlag) match {
-            case (true, true)   => moduleRoot.moduleClass
-            case (true, false)  => classRoot
-            case (false, true)  => owner.newModuleClass(name.toTypeName)
-            case (false, false) => owner.newClass(name.toTypeName)
-          }
+          val sym = (
+            if (isClassRoot) {
+              if (isModuleFlag) moduleRoot.moduleClass setFlag pflags
+              else classRoot setFlag pflags
+            }
+            else owner.newClassSymbol(name.toTypeName, NoPosition, pflags)
+          )
           if (!atEnd)
             sym.typeOfThis = newLazyTypeRef(readNat())
 
           sym
         case MODULEsym =>
           val clazz = at(inforef, () => readType()).typeSymbol // after the NMT_TRANSITION period, we can leave off the () => ... ()
-          if (isModuleRoot) moduleRoot
-          else {
-            val m = owner.newModule(name, clazz)
-            clazz.sourceModule = m
-            m
-          }
+          if (isModuleRoot) moduleRoot setFlag pflags
+          else owner.newLinkedModule(clazz, pflags)
         case VALsym =>
           if (isModuleRoot) { assert(false); NoSymbol }
-          else if (isMethodFlag) owner.newMethod(name)
-          else owner.newValue(name)
+          else owner.newTermSymbol(name.toTermName, NoPosition, pflags)
 
         case _ =>
           errorBadSignature("bad symbol tag: " + tag)
@@ -449,7 +447,7 @@ abstract class UnPickler /*extends reflect.generic.UnPickler*/ {
     private def readArrayAnnot() = {
       readByte() // skip the `annotargarray` tag
       val end = readNat() + readIndex
-      until(end, () => readClassfileAnnotArg(readNat())).toArray(classfileAnnotArgManifest)
+      until(end, () => readClassfileAnnotArg(readNat())).toArray(classfileAnnotArgTag)
     }
     protected def readClassfileAnnotArg(i: Int): ClassfileAnnotArg = bytes(index(i)) match {
       case ANNOTINFO     => NestedAnnotArg(at(i, readAnnotation))
@@ -549,13 +547,13 @@ abstract class UnPickler /*extends reflect.generic.UnPickler*/ {
 
         case MODULEtree =>
           setSymModsName()
-          ModuleDef(mods, name, readTemplateRef())
+          ModuleDef(mods, name.toTermName, readTemplateRef())
 
         case VALDEFtree =>
           setSymModsName()
           val tpt = readTreeRef()
           val rhs = readTreeRef()
-          ValDef(mods, name, tpt, rhs)
+          ValDef(mods, name.toTermName, tpt, rhs)
 
         case DEFDEFtree =>
           setSymModsName()
@@ -563,7 +561,7 @@ abstract class UnPickler /*extends reflect.generic.UnPickler*/ {
           val vparamss = times(readNat(), () => times(readNat(), readValDefRef))
           val tpt = readTreeRef()
           val rhs = readTreeRef()
-          DefDef(mods, name, tparams, vparamss, tpt, rhs)
+          DefDef(mods, name.toTermName, tparams, vparamss, tpt, rhs)
 
         case TYPEDEFtree =>
           setSymModsName()
@@ -575,7 +573,7 @@ abstract class UnPickler /*extends reflect.generic.UnPickler*/ {
           setSymName()
           val rhs = readTreeRef()
           val params = until(end, readIdentRef)
-          LabelDef(name, params, rhs)
+          LabelDef(name.toTermName, params, rhs)
 
         case IMPORTtree =>
           setSym()
@@ -818,16 +816,10 @@ abstract class UnPickler /*extends reflect.generic.UnPickler*/ {
       throw new RuntimeException("malformed Scala signature of " + classRoot.name + " at " + readIndex + "; " + msg)
 
     protected def errorMissingRequirement(name: Name, owner: Symbol): Symbol =
-      missingHook(owner, name) orElse {
-        val what = if (name.isTypeName) "type" else "value"
-        MissingRequirementError.notFound(
-          "while unpickling %s, reference %s %s of %s/%s/%s".format(
-            filename,
-            what, name.decode, owner.tpe.widen,
-            owner.tpe.typeSymbol.ownerChain,
-            owner.info.members.mkString("\n  ", "\n  ", ""))
-        )
-      }
+      missingHook(owner, name) orElse MissingRequirementError.notFound(
+        "bad reference while unpickling %s: %s not found in %s".format(
+          filename, name.longString, owner.tpe.widen)
+      )
 
     def inferMethodAlternative(fun: Tree, argtpes: List[Type], restpe: Type) {} // can't do it; need a compiler for that.
 
@@ -848,10 +840,11 @@ abstract class UnPickler /*extends reflect.generic.UnPickler*/ {
       private val p = phase
       override def complete(sym: Symbol) : Unit = try {
         val tp = at(i, () => readType(sym.isTerm)) // after NMT_TRANSITION, revert `() => readType(sym.isTerm)` to `readType`
-        if (p != phase) atPhase(p) (sym setInfo tp)
-        else sym setInfo tp
-        if (currentRunId != definedAtRunId) sym.setInfo(adaptToNewRunMap(tp))
-      } catch {
+        atPhase(p) (sym setInfo tp)
+        if (currentRunId != definedAtRunId)
+          sym.setInfo(adaptToNewRunMap(tp))
+      }
+      catch {
         case e: MissingRequirementError => throw toTypeError(e)
       }
       override def load(sym: Symbol) { complete(sym) }
@@ -864,13 +857,12 @@ abstract class UnPickler /*extends reflect.generic.UnPickler*/ {
       override def complete(sym: Symbol) = try {
         super.complete(sym)
         var alias = at(j, readSymbol)
-        if (alias.isOverloaded) {
-          atPhase(picklerPhase) {
-            alias = alias suchThat (alt => sym.tpe =:= sym.owner.thisType.memberType(alt))
-          }
-        }
+        if (alias.isOverloaded)
+          alias = atPhase(picklerPhase)((alias suchThat (alt => sym.tpe =:= sym.owner.thisType.memberType(alt))))
+
         sym.asInstanceOf[TermSymbol].setAlias(alias)
-      } catch {
+      }
+      catch {
         case e: MissingRequirementError => throw toTypeError(e)
       }
     }

@@ -22,7 +22,7 @@ import scala.annotation.tailrec
  *  @define willNotTerminateInf
  *  @define mayNotTerminateInf
  */
-trait IndexedSeqOptimized[+A, +Repr] extends IndexedSeqLike[A, Repr] { self =>
+trait IndexedSeqOptimized[+A, +Repr] extends Any with IndexedSeqLike[A, Repr] { self =>
 
   override /*IterableLike*/
   def isEmpty: Boolean = { length == 0 }
@@ -104,7 +104,7 @@ trait IndexedSeqOptimized[+A, +Repr] extends IndexedSeqLike[A, Repr] { self =>
   override /*IterableLike*/
   def slice(from: Int, until: Int): Repr = {
     val lo    = math.max(from, 0)
-    val hi    = math.min(until, length)
+    val hi    = math.min(math.max(until, 0), length)
     val elems = math.max(hi - lo, 0)
     val b     = newBuilder
     b.sizeHint(elems)

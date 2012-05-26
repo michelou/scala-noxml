@@ -33,11 +33,11 @@ trait GenJVMUtil {
   )
 
   // Don't put this in per run caches.
-  private val javaNameCache = new mutable.WeakHashMap[Symbol, String]() ++= List(
-    NothingClass        -> RuntimeNothingClass.fullName('/'),
-    RuntimeNothingClass -> RuntimeNothingClass.fullName('/'),
-    NullClass           -> RuntimeNullClass.fullName('/'),
-    RuntimeNullClass    -> RuntimeNullClass.fullName('/')
+  private val javaNameCache = new mutable.WeakHashMap[Symbol, Name]() ++= List(
+    NothingClass        -> binarynme.RuntimeNothing,
+    RuntimeNothingClass -> binarynme.RuntimeNothing,
+    NullClass           -> binarynme.RuntimeNull,
+    RuntimeNullClass    -> binarynme.RuntimeNull
   )
 
   /** This trait may be used by tools who need access to
@@ -54,14 +54,6 @@ trait GenJVMUtil {
       LE -> JExtendedCode.COND_LE,
       GE -> JExtendedCode.COND_GE
     )
-    val negate = immutable.Map[TestOp, TestOp](
-      EQ -> NE,
-      NE -> EQ,
-      LT -> GE,
-      GT -> LE,
-      LE -> GT,
-      GE -> LT
-    )
 
     /** Specialized array conversion to prevent calling
      *  java.lang.reflect.Array.newInstance via TraversableOnce.toArray
@@ -69,7 +61,6 @@ trait GenJVMUtil {
 
     def mkArray(xs: Traversable[JType]): Array[JType] = { val a = new Array[JType](xs.size); xs.copyToArray(a); a }
     def mkArray(xs: Traversable[String]): Array[String] = { val a = new Array[String](xs.size); xs.copyToArray(a); a }
-
 
     /** Return the a name of this symbol that can be used on the Java
      *  platform.  It removes spaces from names.
@@ -90,7 +81,7 @@ trait GenJVMUtil {
           sym.javaBinaryName
         else
           sym.javaSimpleName
-      })
+      }).toString
 
     def javaType(t: TypeKind): JType = (t: @unchecked) match {
       case UNIT            => JType.VOID
@@ -130,7 +121,7 @@ trait GenJVMUtil {
         case DoubleTag  => jcode emitPUSH const.doubleValue
         case StringTag  => jcode emitPUSH const.stringValue
         case NullTag    => jcode.emitACONST_NULL()
-        case ClassTag   =>
+        case ClazzTag   =>
           val kind = toTypeKind(const.typeValue)
           val toPush =
             if (kind.isValueType) classLiteral(kind)

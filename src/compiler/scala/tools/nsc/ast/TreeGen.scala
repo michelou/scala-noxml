@@ -9,11 +9,12 @@ package ast
 import scala.collection.mutable.ListBuffer
 import symtab.Flags._
 import symtab.SymbolTable
+import language.postfixOps
 
 /** XXX to resolve: TreeGen only assumes global is a SymbolTable, but
  *  TreeDSL at the moment expects a Global.  Can we get by with SymbolTable?
  */
-abstract class TreeGen extends reflect.internal.TreeGen {
+abstract class TreeGen extends reflect.internal.TreeGen with TreeDSL {
   val global: Global
 
   import global._
@@ -31,14 +32,32 @@ abstract class TreeGen extends reflect.internal.TreeGen {
       tree
   }
 
-  // wrap the given expression in a SoftReference so it can be gc-ed
-  def mkSoftRef(expr: Tree): Tree = atPos(expr.pos) {
-    New(SoftReferenceClass, expr)
+  /** Builds a fully attributed wildcard import node.
+   */
+  def mkWildcardImport(pkg: Symbol): Import = {
+    assert(pkg ne null, this)
+    val qual = gen.mkAttributedStableRef(pkg)
+    val importSym = (
+      NoSymbol
+        newImport NoPosition
+          setFlag SYNTHETIC
+          setInfo analyzer.ImportType(qual)
+    )
+    val importTree = (
+      Import(qual, List(ImportSelector(nme.WILDCARD, -1, null, -1)))
+        setSymbol importSym
+          setType NoType
+    )
+    importTree
   }
+
+  // wrap the given expression in a SoftReference so it can be gc-ed
+  def mkSoftRef(expr: Tree): Tree = atPos(expr.pos)(New(SoftReferenceClass.tpe, expr))
+
   // annotate the expression with @unchecked
   def mkUnchecked(expr: Tree): Tree = atPos(expr.pos) {
     // This can't be "Annotated(New(UncheckedClass), expr)" because annotations
-    // are very pick about things and it crashes the compiler with "unexpected new".
+    // are very picky about things and it crashes the compiler with "unexpected new".
     Annotated(New(scalaDot(UncheckedClass.name), List(Nil)), expr)
   }
   // if it's a Match, mark the selector unchecked; otherwise nothing.
@@ -47,16 +66,56 @@ abstract class TreeGen extends reflect.internal.TreeGen {
     case _                      => tree
   }
 
-  def withDefaultCase(matchExpr: Tree, defaultAction: Tree/*scrutinee*/ => Tree): Tree = matchExpr match {
-    case Match(scrutinee, cases) =>
-      if (cases exists treeInfo.isDefaultCase) matchExpr
-      else {
-        val defaultCase = CaseDef(Ident(nme.WILDCARD), EmptyTree, defaultAction(scrutinee))
-        Match(scrutinee, cases :+ defaultCase)
-      }
-    case _ =>
-      matchExpr
-    // [Martin] Adriaan: please fill in virtpatmat transformation here
+  def mkSynthSwitchSelector(expr: Tree): Tree = atPos(expr.pos) {
+    // This can't be "Annotated(New(SwitchClass), expr)" because annotations
+    // are very picky about things and it crashes the compiler with "unexpected new".
+    Annotated(Ident(nme.synthSwitch), expr)
+  }
+
+  def hasSynthCaseSymbol(t: Tree) = (t.symbol ne null) && (t.symbol hasFlag (CASE | SYNTHETIC))
+
+  // TODO: would be so much nicer if we would know during match-translation (i.e., type checking)
+  // whether we should emit missingCase-style apply (and isDefinedAt), instead of transforming trees post-factum
+  class MatchMatcher {
+    def caseMatch(orig: Tree, selector: Tree, cases: List[CaseDef], wrap: Tree => Tree): Tree = unknownTree(orig)
+    def caseVirtualizedMatch(orig: Tree, _match: Tree, targs: List[Tree], scrut: Tree, matcher: Tree): Tree = unknownTree(orig)
+    def caseVirtualizedMatchOpt(orig: Tree, prologue: List[Tree], cases: List[Tree], matchEndDef: Tree, wrap: Tree => Tree): Tree = unknownTree(orig)
+
+    def genVirtualizedMatch(prologue: List[Tree], cases: List[Tree], matchEndDef: Tree): Tree = Block(prologue ++ cases, matchEndDef)
+
+    def apply(matchExpr: Tree): Tree = matchExpr match {
+      // old-style match or virtpatmat switch
+      case Match(selector, cases) => // println("simple match: "+ (selector, cases) + "for:\n"+ matchExpr )
+        caseMatch(matchExpr, selector, cases, identity)
+      // old-style match or virtpatmat switch
+      case Block((vd: ValDef) :: Nil, orig@Match(selector, cases)) => // println("block match: "+ (selector, cases, vd) + "for:\n"+ matchExpr )
+        caseMatch(matchExpr, selector, cases, m => copyBlock(matchExpr, List(vd), m))
+      // virtpatmat
+      case Apply(Apply(TypeApply(Select(tgt, nme.runOrElse), targs), List(scrut)), List(matcher)) if opt.virtPatmat => // println("virt match: "+ (tgt, targs, scrut, matcher) + "for:\n"+ matchExpr )
+        caseVirtualizedMatch(matchExpr, tgt, targs, scrut, matcher)
+      // optimized version of virtpatmat
+      case Block(stats, matchEndDef) if opt.virtPatmat && (stats forall hasSynthCaseSymbol) =>
+        // the assumption is once we encounter a case, the remainder of the block will consist of cases
+        // the prologue may be empty, usually it is the valdef that stores the scrut
+        val (prologue, cases) = stats span (s => !s.isInstanceOf[LabelDef])
+        caseVirtualizedMatchOpt(matchExpr, prologue, cases, matchEndDef, identity)
+      // optimized version of virtpatmat
+      case Block(outerStats, orig@Block(stats, matchEndDef)) if opt.virtPatmat && (stats forall hasSynthCaseSymbol) =>
+        val (prologue, cases) = stats span (s => !s.isInstanceOf[LabelDef])
+        caseVirtualizedMatchOpt(matchExpr, prologue, cases, matchEndDef, m => copyBlock(matchExpr, outerStats, m))
+      case other =>
+        unknownTree(other)
+    }
+
+    def unknownTree(t: Tree): Tree = throw new MatchError(t)
+    def copyBlock(orig: Tree, stats: List[Tree], expr: Tree): Block = Block(stats, expr)
+
+    def dropSyntheticCatchAll(cases: List[CaseDef]): List[CaseDef] =
+      if (!opt.virtPatmat) cases
+      else cases filter {
+             case CaseDef(pat, EmptyTree, Throw(Apply(Select(New(exTpt), nme.CONSTRUCTOR), _))) if (treeInfo.isWildcardArg(pat) && (exTpt.tpe.typeSymbol eq MatchErrorClass)) => false
+             case CaseDef(pat, guard, body) => true
+           }
   }
 
   def mkCached(cvar: Symbol, expr: Tree): Tree = {
@@ -77,17 +136,17 @@ abstract class TreeGen extends reflect.internal.TreeGen {
   }
 
   def mkModuleVarDef(accessor: Symbol) = {
-    val mval = (
-      accessor.owner.newVariable(accessor.pos.focus, nme.moduleVarName(accessor.name))
-      setInfo accessor.tpe.finalResultType
-      setFlag (MODULEVAR)
-    )
+    val inClass    = accessor.owner.isClass
+    val extraFlags = if (inClass) PrivateLocal | SYNTHETIC else 0
 
-    mval addAnnotation VolatileAttr
-    if (mval.owner.isClass) {
-      mval setFlag (PrivateLocal | SYNTHETIC)
-      mval.owner.info.decls.enter(mval)
-    }
+    val mval = (
+      accessor.owner.newVariable(nme.moduleVarName(accessor.name), accessor.pos.focus, MODULEVAR | extraFlags)
+        setInfo accessor.tpe.finalResultType
+        addAnnotation VolatileAttr
+    )
+    if (inClass)
+      mval.owner.info.decls enter mval
+
     ValDef(mval)
   }
 
@@ -99,10 +158,11 @@ abstract class TreeGen extends reflect.internal.TreeGen {
   def mkModuleAccessDef(accessor: Symbol, msym: Symbol) =
     DefDef(accessor, Select(This(msym.owner), msym))
 
-  def newModule(accessor: Symbol, tpe: Type) =
-    New(TypeTree(tpe),
-        List(for (pt <- tpe.typeSymbol.primaryConstructor.info.paramTypes)
-             yield This(accessor.owner.enclClass)))
+  def newModule(accessor: Symbol, tpe: Type) = {
+    val ps = tpe.typeSymbol.primaryConstructor.info.paramTypes
+    if (ps.isEmpty) New(tpe)
+    else New(tpe, This(accessor.owner.enclClass))
+  }
 
   // def m: T;
   def mkModuleAccessDcl(accessor: Symbol) =
@@ -128,7 +188,7 @@ abstract class TreeGen extends reflect.internal.TreeGen {
   def mkManifestFactoryCall(full: Boolean, constructor: String, tparg: Type, args: List[Tree]): Tree =
     mkMethodCall(
       if (full) FullManifestModule else PartialManifestModule,
-      constructor,
+      newTermName(constructor),
       List(tparg),
       args
     )
@@ -136,6 +196,18 @@ abstract class TreeGen extends reflect.internal.TreeGen {
   /** Make a synchronized block on 'monitor'. */
   def mkSynchronized(monitor: Tree, body: Tree): Tree =
     Apply(Select(monitor, Object_synchronized), List(body))
+
+  def mkAppliedTypeForCase(clazz: Symbol): Tree = {
+    val numParams = clazz.typeParams.size
+    if (clazz.typeParams.isEmpty) Ident(clazz)
+    else AppliedTypeTree(Ident(clazz), 1 to numParams map (_ => Bind(tpnme.WILDCARD, EmptyTree)) toList)
+  }
+  def mkBindForCase(patVar: Symbol, clazz: Symbol, targs: List[Type]): Tree = {
+    Bind(patVar, Typed(Ident(nme.WILDCARD),
+      if (targs.isEmpty) mkAppliedTypeForCase(clazz)
+      else AppliedTypeTree(Ident(clazz), targs map TypeTree)
+    ))
+  }
 
   def wildcardStar(tree: Tree) =
     atPos(tree.pos) { Typed(tree, Ident(tpnme.WILDCARD_STAR)) }
@@ -161,28 +233,57 @@ abstract class TreeGen extends reflect.internal.TreeGen {
    *  apply the element type directly.
    */
   def mkWrapArray(tree: Tree, elemtp: Type) = {
-    val sym = elemtp.typeSymbol
-    val meth: Name =
-      if (isValueClass(sym)) "wrap"+sym.name+"Array"
-      else if ((elemtp <:< AnyRefClass.tpe) && !isPhantomClass(sym)) "wrapRefArray"
-      else "genericWrapArray"
-
     mkMethodCall(
       PredefModule,
-      meth,
-      if (isValueClass(sym)) Nil else List(elemtp),
+      wrapArrayMethodName(elemtp),
+      if (isPrimitiveValueType(elemtp)) Nil else List(elemtp),
       List(tree)
     )
+  }
+
+  /** Cast `tree` to type `pt` by creating
+   *  one of the calls of the form
+   *
+   *    x.asInstanceOf[`pt`]     up to phase uncurry
+   *    x.asInstanceOf[`pt`]()   if after uncurry but before erasure
+   *    x.$asInstanceOf[`pt`]()  if at or after erasure
+   */
+  def mkCast(tree: Tree, pt: Type): Tree = {
+    debuglog("casting " + tree + ":" + tree.tpe + " to " + pt + " at phase: " + phase)
+    assert(!tree.tpe.isInstanceOf[MethodType], tree)
+    assert(pt eq pt.normalize, tree +" : "+ debugString(pt) +" ~>"+ debugString(pt.normalize))
+    atPos(tree.pos) {
+      mkAsInstanceOf(tree, pt, any = !phase.next.erasedTypes, wrapInApply = isAtPhaseAfter(currentRun.uncurryPhase))
+    }
   }
 
   /** Generate a cast for tree Tree representing Array with
    *  elem type elemtp to expected type pt.
    */
   def mkCastArray(tree: Tree, elemtp: Type, pt: Type) =
-    if (elemtp.typeSymbol == AnyClass && isValueClass(tree.tpe.typeArgs.head.typeSymbol))
-      mkCast(mkRuntimeCall("toObjectArray", List(tree)), pt)
+    if (elemtp.typeSymbol == AnyClass && isPrimitiveValueType(tree.tpe.typeArgs.head))
+      mkCast(mkRuntimeCall(nme.toObjectArray, List(tree)), pt)
     else
       mkCast(tree, pt)
+
+  def mkZeroContravariantAfterTyper(tp: Type): Tree = {
+    // contravariant -- for replacing an argument in a method call
+    // must use subtyping, as otherwise we miss types like `Any with Int`
+    val tree =
+      if      (NullClass.tpe    <:< tp) Literal(Constant(null))
+      else if (UnitClass.tpe    <:< tp) Literal(Constant())
+      else if (BooleanClass.tpe <:< tp) Literal(Constant(false))
+      else if (FloatClass.tpe   <:< tp) Literal(Constant(0.0f))
+      else if (DoubleClass.tpe  <:< tp) Literal(Constant(0.0d))
+      else if (ByteClass.tpe    <:< tp) Literal(Constant(0.toByte))
+      else if (ShortClass.tpe   <:< tp) Literal(Constant(0.toShort))
+      else if (IntClass.tpe     <:< tp) Literal(Constant(0))
+      else if (LongClass.tpe    <:< tp) Literal(Constant(0L))
+      else if (CharClass.tpe    <:< tp) Literal(Constant(0.toChar))
+      else mkCast(Literal(Constant(null)), tp)
+
+    tree
+  }
 
   /** Translate names in Select/Ident nodes to type names.
    */
@@ -205,11 +306,7 @@ abstract class TreeGen extends reflect.internal.TreeGen {
    */
   private def mkPackedValDef(expr: Tree, owner: Symbol, name: Name): (ValDef, () => Ident) = {
     val packedType = typer.packedType(expr, owner)
-    val sym = (
-      owner.newValue(expr.pos.makeTransparent, name)
-      setFlag SYNTHETIC
-      setInfo packedType
-    )
+    val sym = owner.newValue(name, expr.pos.makeTransparent, SYNTHETIC) setInfo packedType
 
     (ValDef(sym, expr), () => Ident(sym) setPos sym.pos.focus setType expr.tpe)
   }
@@ -255,23 +352,19 @@ abstract class TreeGen extends reflect.internal.TreeGen {
     else Block(prefix, containing) setPos (prefix.head.pos union containing.pos)
   }
 
-  /** Return a double-checked locking idiom around the syncBody tree. It guards with `cond` and
+  /** Return the synchronized part of the double-checked locking idiom around the syncBody tree. It guards with `cond` and
    *  synchronizez on `clazz.this`. Additional statements can be included after initialization,
    *  (outside the synchronized block).
    *
    *  The idiom works only if the condition is using a volatile field.
    *  @see http://www.cs.umd.edu/~pugh/java/memoryModel/DoubleCheckedLocking.html
    */
-  def mkDoubleCheckedLocking(clazz: Symbol, cond: Tree, syncBody: List[Tree], stats: List[Tree]): Tree =
-    mkDoubleCheckedLocking(mkAttributedThis(clazz), cond, syncBody, stats)
-
-  def mkDoubleCheckedLocking(attrThis: Tree, cond: Tree, syncBody: List[Tree], stats: List[Tree]): Tree = {
-    If(cond,
-       Block(
-         mkSynchronized(
-           attrThis,
-           If(cond, Block(syncBody: _*), EmptyTree)) ::
-         stats: _*),
-       EmptyTree)
-  }
+  def mkSynchronizedCheck(clazz: Symbol, cond: Tree, syncBody: List[Tree], stats: List[Tree]): Tree =
+    mkSynchronizedCheck(mkAttributedThis(clazz), cond, syncBody, stats)
+    
+  def mkSynchronizedCheck(attrThis: Tree, cond: Tree, syncBody: List[Tree], stats: List[Tree]): Tree = 
+    Block(mkSynchronized(
+      attrThis,
+      If(cond, Block(syncBody: _*), EmptyTree)) ::
+      stats: _*)
 }

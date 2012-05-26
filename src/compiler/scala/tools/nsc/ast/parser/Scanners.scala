@@ -10,9 +10,9 @@ import scala.reflect.internal.Chars._
 import Tokens._
 import scala.annotation.switch
 import scala.collection.mutable.{ ListBuffer, ArrayBuffer }
-/*@XML*/
+/*@XML
 import scala.xml.Utility.{ isNameStart }
-/*XML@*/
+XML@*/
 
 /** See Parsers.scala / ParsersCommon for some explanation of ScannersCommon.
  */
@@ -87,6 +87,8 @@ trait Scanners extends ScannersCommon {
   abstract class Scanner extends CharArrayReader with TokenData with ScannerCommon {
     private def isDigit(c: Char) = java.lang.Character isDigit c
 
+    def isAtEnd = charOffset >= buf.length
+
     def flush = { charOffset = offset; nextChar(); this }
 
     def resume(lastCode: Int) = {
@@ -113,10 +115,18 @@ trait Scanners extends ScannersCommon {
     }
 
     /** Clear buffer and set name and token */
-    private def finishNamed() {
+    private def finishNamed(idtoken: Int = IDENTIFIER) {
       name = newTermName(cbuf.toString)
-      token = name2token(name)
       cbuf.clear()
+      token = idtoken
+      if (idtoken == IDENTIFIER) {
+        val idx = name.start - kwOffset
+        if (idx >= 0 && idx < kwArray.length) {
+          token = kwArray(idx)
+          if (token == IDENTIFIER && allowIdent != name)
+            deprecationWarning(name+" is now a reserved word; usage as an identifier is deprecated")
+        }
+      }
     }
 
     /** Clear buffer and set string */
@@ -163,11 +173,24 @@ trait Scanners extends ScannersCommon {
      *  RBRACKET  if region starts with '['
      *  RBRACE    if region starts with '{'
      *  ARROW     if region starts with `case'
-     *  STRINGFMT if region is a string interpolation expression starting with '\{'
+     *  STRINGLIT if region is a string interpolation expression starting with '${'
+     *            (the STRINGLIT appears twice in succession on the stack iff the
+     *             expression is a multiline string literal).
      */
     var sepRegions: List[Int] = List()
 
 // Get next token ------------------------------------------------------------
+
+    /** Are we directly in a string interpolation expression?
+     */
+    @inline private def inStringInterpolation =
+      sepRegions.nonEmpty && sepRegions.head == STRINGLIT
+
+    /** Are we directly in a multiline string interpolation expression?
+     *  @pre: inStringInterpolation
+     */
+    @inline private def inMultiLineInterpolation =
+      inStringInterpolation && sepRegions.tail.nonEmpty && sepRegions.tail.head == STRINGPART
 
     /** read next token and return last offset
      */
@@ -175,6 +198,20 @@ trait Scanners extends ScannersCommon {
       val off = offset
       nextToken()
       off
+    }
+
+    /** Allow an otherwise deprecated ident here */
+    private var allowIdent: Name = nme.EMPTY
+
+    /** Get next token, and allow the otherwise deprecated ident `name`  */
+    def nextTokenAllow(name: Name) = {
+      val prev = allowIdent
+      allowIdent = name
+      try {
+        nextToken()
+      } finally {
+        allowIdent = prev
+      }
     }
 
     /** Produce next token, filling TokenData fields of Scanner.
@@ -191,29 +228,39 @@ trait Scanners extends ScannersCommon {
           sepRegions = RBRACE :: sepRegions
         case CASE =>
           sepRegions = ARROW :: sepRegions
-        case STRINGPART =>
-          sepRegions = STRINGFMT :: sepRegions
         case RBRACE =>
-          sepRegions = sepRegions dropWhile (_ != RBRACE)
+          while (!sepRegions.isEmpty && sepRegions.head != RBRACE)
+            sepRegions = sepRegions.tail
           if (!sepRegions.isEmpty) sepRegions = sepRegions.tail
-        case RBRACKET | RPAREN | ARROW | STRINGFMT =>
+          docBuffer = null
+        case RBRACKET | RPAREN =>
           if (!sepRegions.isEmpty && sepRegions.head == lastToken)
             sepRegions = sepRegions.tail
-        case _ =>
-      }
-      (lastToken: @switch) match {
-        case RBRACE | RBRACKET | RPAREN =>
           docBuffer = null
+        case ARROW =>
+          if (!sepRegions.isEmpty && sepRegions.head == lastToken)
+            sepRegions = sepRegions.tail
+        case STRINGLIT =>
+          if (inMultiLineInterpolation)
+            sepRegions = sepRegions.tail.tail
+          else if (inStringInterpolation)
+            sepRegions = sepRegions.tail
         case _ =>
       }
 
       // Read a token or copy it from `next` tokenData
       if (next.token == EMPTY) {
         lastOffset = charOffset - 1
-        if(lastOffset > 0 && buf(lastOffset) == '\n' && buf(lastOffset - 1) == '\r') {
+        if (lastOffset > 0 && buf(lastOffset) == '\n' && buf(lastOffset - 1) == '\r') {
           lastOffset -= 1
         }
-        fetchToken()
+        if (inStringInterpolation) fetchStringPart() else fetchToken()
+        if(token == ERROR) {
+          if (inMultiLineInterpolation)
+            sepRegions = sepRegions.tail.tail
+          else if (inStringInterpolation)
+            sepRegions = sepRegions.tail
+        }
       } else {
         this copyFrom next
         next.token = EMPTY
@@ -310,8 +357,10 @@ trait Scanners extends ScannersCommon {
              'z' =>
           putChar(ch)
           nextChar()
-          getIdentRest()  // scala-mode: wrong indent for multi-line case blocks
-/*@XML*/
+          getIdentRest()
+          if (ch == '"' && token == IDENTIFIER)
+            token = INTERPOLATIONID
+/*@XML
         case '<' => // is XMLSTART?
           val last = if (charOffset >= 2) buf(charOffset - 2) else ' '
           nextChar()
@@ -323,7 +372,7 @@ trait Scanners extends ScannersCommon {
               putChar('<')
               getOperatorRest()
           }
-/*XML@*/
+XML@*/
         case '~' | '!' | '@' | '#' | '%' |
              '^' | '*' | '+' | '-' | /*'<' | */
              '>' | '?' | ':' | '=' | '&' |
@@ -364,18 +413,37 @@ trait Scanners extends ScannersCommon {
         case '`' =>
           getBackquotedIdent()
         case '\"' =>
-          nextChar()
-          if (ch == '\"') {
-            nextChar()
+          if (token == INTERPOLATIONID) {
+            nextRawChar()
             if (ch == '\"') {
               nextRawChar()
-              getMultiLineStringLit()
+              if (ch == '\"') {
+                nextRawChar()
+                getStringPart(multiLine = true)
+                sepRegions = STRINGPART :: sepRegions // indicate string part
+                sepRegions = STRINGLIT :: sepRegions // once more to indicate multi line string part
+              } else {
+                token = STRINGLIT
+                strVal = ""
+              }
             } else {
-              token = STRINGLIT
-              strVal = ""
+              getStringPart(multiLine = false)
+              sepRegions = STRINGLIT :: sepRegions // indicate single line string part
             }
           } else {
-            getStringPart()
+            nextChar()
+            if (ch == '\"') {
+              nextChar()
+              if (ch == '\"') {
+                nextRawChar()
+                getRawStringLit()
+              } else {
+                token = STRINGLIT
+                strVal = ""
+              }
+            } else {
+              getStringLit()
+            }
           }
         case '\'' =>
           nextChar()
@@ -401,9 +469,7 @@ trait Scanners extends ScannersCommon {
             token = DOT
           }
         case ';' =>
-          nextChar()
-          if (inStringInterpolation) getFormatString()
-          else token = SEMI
+          nextChar(); token = SEMI
         case ',' =>
           nextChar(); token = COMMA
         case '(' =>
@@ -413,22 +479,13 @@ trait Scanners extends ScannersCommon {
         case ')' =>
           nextChar(); token = RPAREN
         case '}' =>
-          if (token == STRINGFMT) {
-            nextChar()
-            getStringPart()
-          } else if (inStringInterpolation) {
-            strVal = "";
-            token = STRINGFMT
-          } else {
-            nextChar();
-            token = RBRACE
-          }
+          nextChar(); token = RBRACE
         case '[' =>
           nextChar(); token = LBRACKET
         case ']' =>
           nextChar(); token = RBRACKET
         case SU =>
-          if (charOffset >= buf.length) token = EOF
+          if (isAtEnd) token = EOF
           else {
             syntaxError("illegal character")
             nextChar()
@@ -447,7 +504,7 @@ trait Scanners extends ScannersCommon {
             nextChar()
             getOperatorRest()
           } else {
-            syntaxError("illegal character")
+            syntaxError("illegal character '" + ("" + '\\' + 'u' + "%04x".format(ch: Int)) + "'")
             nextChar()
           }
       }
@@ -510,11 +567,6 @@ trait Scanners extends ScannersCommon {
       }
     }
 
-    /** Are we directly in a string interpolation expression?
-     */
-    private def inStringInterpolation =
-      sepRegions.nonEmpty && sepRegions.head == STRINGFMT
-
     /** Can token start a statement? */
     def inFirstOfStat(token: Int) = token match {
       case EOF | CATCH | ELSE | EXTENDS | FINALLY | FORSOME | MATCH | WITH | YIELD |
@@ -529,7 +581,7 @@ trait Scanners extends ScannersCommon {
     def inLastOfStat(token: Int) = token match {
       case CHARLIT | INTLIT | LONGLIT | FLOATLIT | DOUBLELIT | STRINGLIT | SYMBOLLIT |
            IDENTIFIER | BACKQUOTED_IDENT | THIS | NULL | TRUE | FALSE | RETURN | USCORE |
-           TYPE /*@XML*/ | XMLSTART /*XML@*/ | RPAREN | RBRACKET | RBRACE =>
+           TYPE /*@XML | XMLSTART XML@*/ | RPAREN | RBRACKET | RBRACE =>
         true
       case _ =>
         false
@@ -542,9 +594,8 @@ trait Scanners extends ScannersCommon {
       getLitChars('`')
       if (ch == '`') {
         nextChar()
-        finishNamed()
+        finishNamed(BACKQUOTED_IDENT)
         if (name.length == 0) syntaxError("empty quoted identifier")
-        token = BACKQUOTED_IDENT
       }
       else syntaxError("unclosed quoted identifier")
     }
@@ -613,70 +664,118 @@ trait Scanners extends ScannersCommon {
       }
     }
 
-    def getFormatString() = {
-      getLitChars('}', '"', ' ', '\t')
-      if (ch == '}') {
-        setStrVal()
-        if (strVal.length > 0) strVal = "%" + strVal
-        token = STRINGFMT
-      } else {
-        syntaxError("unclosed format string")
-      }
-    }
 
-    def getStringPart() = {
-      while (ch != '"' && (ch != CR && ch != LF && ch != SU || isUnicodeEscape) && maybeGetLitChar()) {}
+// Literals -----------------------------------------------------------------
+
+    private def getStringLit() = {
+      getLitChars('"')
       if (ch == '"') {
         setStrVal()
         nextChar()
         token = STRINGLIT
-      } else if (ch == '{' && settings.Xexperimental.value) {
-        setStrVal()
-        nextChar()
-        token = STRINGPART
-      } else {
-        syntaxError("unclosed string literal")
-      }
+      } else syntaxError("unclosed string literal")
     }
 
-    private def getMultiLineStringLit() {
+    private def getRawStringLit(): Unit = {
       if (ch == '\"') {
         nextRawChar()
-        if (ch == '\"') {
-          nextRawChar()
-          if (ch == '\"') {
-            nextChar()
-            while (ch == '\"') {
-              putChar('\"')
-              nextChar()
-            }
-            token = STRINGLIT
-            setStrVal()
-          } else {
-            putChar('\"')
-            putChar('\"')
-            getMultiLineStringLit()
-          }
-        } else {
-          putChar('\"')
-          getMultiLineStringLit()
-        }
+        if (isTripleQuote()) {
+          setStrVal()
+          token = STRINGLIT
+        } else
+          getRawStringLit()
       } else if (ch == SU) {
         incompleteInputError("unclosed multi-line string literal")
       } else {
         putChar(ch)
         nextRawChar()
-        getMultiLineStringLit()
+        getRawStringLit()
       }
     }
 
-// Literals -----------------------------------------------------------------
+    @annotation.tailrec private def getStringPart(multiLine: Boolean): Unit = {
+      def finishStringPart() = {
+        setStrVal()
+        token = STRINGPART
+        next.lastOffset = charOffset - 1
+        next.offset = charOffset - 1
+      }
+      if (ch == '"') {
+        if (multiLine) {
+          nextRawChar()
+          if (isTripleQuote()) {
+            setStrVal()
+            token = STRINGLIT
+          } else
+            getStringPart(multiLine)
+        } else {
+          nextChar()
+          setStrVal()
+          token = STRINGLIT
+        }
+      } else if (ch == '$') {
+        nextRawChar()
+        if (ch == '$') {
+          putChar(ch)
+          nextRawChar()
+          getStringPart(multiLine)
+        } else if (ch == '{') {
+          finishStringPart()
+          nextRawChar()
+          next.token = LBRACE
+        } else if (Character.isUnicodeIdentifierStart(ch)) {
+          finishStringPart()
+          do {
+            putChar(ch)
+            nextRawChar()
+          } while (ch != SU && Character.isUnicodeIdentifierPart(ch))
+          next.token = IDENTIFIER
+          next.name = newTermName(cbuf.toString)
+          cbuf.clear()
+        } else {
+          syntaxError("invalid string interpolation")
+        }
+      } else {
+        val isUnclosedLiteral = !isUnicodeEscape && (ch == SU || (!multiLine && (ch == CR || ch == LF)))
+        if (isUnclosedLiteral) {
+          syntaxError(if (!multiLine) "unclosed string literal" else "unclosed multi-line string literal")
+        } else {
+          putChar(ch)
+          nextRawChar()
+          getStringPart(multiLine)
+        }
+      }
+    }
 
-    /** read next character in character or string literal:
-     *  if character sequence is a \{ escape, do not copy it into the string and return false.
-     *  otherwise return true.
+    private def fetchStringPart() = {
+      offset = charOffset - 1
+      getStringPart(multiLine = inMultiLineInterpolation)
+    }
+
+    private def isTripleQuote(): Boolean =
+      if (ch == '"') {
+        nextRawChar()
+        if (ch == '"') {
+          nextChar()
+          while (ch == '"') {
+            putChar('"')
+            nextChar()
+          }
+          true
+        } else {
+          putChar('"')
+          putChar('"')
+          false
+        }
+      } else {
+        putChar('"')
+        false
+      }
+
+    /** copy current character into cbuf, interpreting any escape sequences,
+     *  and advance to next character.
      */
-    protected def maybeGetLitChar(): Boolean = {
+    protected def getLitChar(): Unit =
       if (ch == '\\') {
         nextChar()
         if ('0' <= ch && ch <= '7') {
@@ -702,7 +801,6 @@ trait Scanners extends ScannersCommon {
             case '\"' => putChar('\"')
             case '\'' => putChar('\'')
             case '\\' => putChar('\\')
-            case '{'  => return false
             case _    => invalidEscape()
           }
           nextChar()
@@ -711,21 +809,15 @@ trait Scanners extends ScannersCommon {
         putChar(ch)
         nextChar()
       }
-      true
-    }
 
     protected def invalidEscape(): Unit = {
       syntaxError(charOffset - 1, "invalid escape character")
       putChar(ch)
     }
 
-    protected def getLitChar(): Unit =
-      if (!maybeGetLitChar()) invalidEscape()
-
-    private def getLitChars(delimiters: Char*) {
-      while (!(delimiters contains ch) && (ch != CR && ch != LF && ch != SU || isUnicodeEscape)) {
+    private def getLitChars(delimiter: Char) = {
+      while (ch != delimiter && !isAtEnd && (ch != SU && ch != CR && ch != LF || isUnicodeEscape))
         getLitChar()
-      }
     }
 
     /** read fractional part and exponent of floating point number
@@ -975,8 +1067,8 @@ trait Scanners extends ScannersCommon {
         "string(" + strVal + ")"
       case STRINGPART =>
         "stringpart(" + strVal + ")"
-      case STRINGFMT =>
-        "stringfmt(" + strVal + ")"
+      case INTERPOLATIONID =>
+        "interpolationid(" + name + ")"
       case SEMI =>
         ";"
       case NEWLINE =>
@@ -1063,8 +1155,9 @@ trait Scanners extends ScannersCommon {
     nme.VIEWBOUNDkw -> VIEWBOUND,
     nme.SUPERTYPEkw -> SUPERTYPE,
     nme.HASHkw      -> HASH,
-    nme.ATkw        -> AT
-  )
+    nme.ATkw        -> AT,
+    nme.MACROkw     -> IDENTIFIER,
+    nme.THENkw      -> IDENTIFIER)
 
   private var kwOffset: Int = -1
   private val kwArray: Array[Int] = {
@@ -1073,14 +1166,7 @@ trait Scanners extends ScannersCommon {
     arr
   }
 
-  final val token2name = allKeywords map (_.swap) toMap
-
-  /** Convert name to token */
-  final def name2token(name: Name) = {
-    val idx = name.start - kwOffset
-    if (idx >= 0 && idx < kwArray.length) kwArray(idx)
-    else IDENTIFIER
-  }
+  final val token2name = (allKeywords map (_.swap)).toMap
 
 // Token representation ----------------------------------------------------
 
@@ -1092,8 +1178,7 @@ trait Scanners extends ScannersCommon {
     case LONGLIT => "long literal"
     case FLOATLIT => "float literal"
     case DOUBLELIT => "double literal"
-    case STRINGLIT | STRINGPART => "string literal"
-    case STRINGFMT => "format string"
+    case STRINGLIT | STRINGPART | INTERPOLATIONID => "string literal"
     case SYMBOLLIT => "symbol literal"
     case LPAREN => "'('"
     case RPAREN => "')'"
@@ -1109,7 +1194,7 @@ trait Scanners extends ScannersCommon {
     case COMMA => "','"
     case CASECLASS => "case class"
     case CASEOBJECT => "case object"
-    /*@XML*/ case XMLSTART => "$XMLSTART$<" /*XML@*/
+    /*@XML case XMLSTART => "$XMLSTART$<" XML@*/
     case _ =>
       (token2name get token) match {
         case Some(name) => "'" + name + "'"

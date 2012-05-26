@@ -3,8 +3,9 @@
 package scala.tools.selectivecps
 
 import scala.tools.nsc.Global
+import scala.tools.nsc.typechecker.Modes
 
-abstract class CPSAnnotationChecker extends CPSUtils {
+abstract class CPSAnnotationChecker extends CPSUtils with Modes {
   val global: Global
   import global._
   import definitions._
@@ -50,7 +51,27 @@ abstract class CPSAnnotationChecker extends CPSUtils {
 
       // @plus @cps will fall through and compare the @cps type args
       // @cps parameters must match exactly
-      (annots1 corresponds annots2)(_.atp <:< _.atp)
+      if ((annots1 corresponds annots2)(_.atp <:< _.atp))
+        return true
+
+      // Need to handle uninstantiated type vars specially:
+
+      // g map (x => x)  with expected type List[Int] @cps
+      // results in comparison ?That <:< List[Int] @cps
+
+      // Instantiating ?That to an annotated type would fail during
+      // transformation.
+
+      // Instead we force-compare tpe1 <:< tpe2.withoutAnnotations
+      // to trigger instantiation of the TypeVar to the base type
+
+      // This is a bit unorthodox (we're only supposed to look at
+      // annotations here) but seems to work.
+
+      if (!annots2.isEmpty && !tpe1.isGround)
+        return tpe1 <:< tpe2.withoutAnnotations
+
+      false
     }
 
     /** Refine the computed least upper bound of a list of types.
@@ -74,8 +95,7 @@ abstract class CPSAnnotationChecker extends CPSUtils {
       if (!cpsEnabled) return bounds
 
       val anyAtCPS = newCpsParamsMarker(NothingClass.tpe, AnyClass.tpe)
-
-      if (isFunctionType(tparams.head.owner.tpe) || tparams.head.owner == PartialFunctionClass) {
+      if (isFunctionType(tparams.head.owner.tpe) || isPartialFunctionType(tparams.head.owner.tpe)) {
         vprintln("function bound: " + tparams.head.owner.tpe + "/"+bounds+"/"+targs)
         if (hasCpsParamTypes(targs.last))
           bounds.reverse match {
@@ -158,59 +178,38 @@ abstract class CPSAnnotationChecker extends CPSUtils {
     override def adaptAnnotations(tree: Tree, mode: Int, pt: Type): Tree = {
       if (!cpsEnabled) return tree
 
-      vprintln("adapt annotations " + tree + " / " + tree.tpe + " / " + Integer.toHexString(mode) + " / " + pt)
+      vprintln("adapt annotations " + tree + " / " + tree.tpe + " / " + modeString(mode) + " / " + pt)
 
-      val annots1 = cpsParamAnnotation(tree.tpe)
-      val annots2 = cpsParamAnnotation(pt)
+      val patMode   = (mode & global.analyzer.PATTERNmode) != 0
+      val exprMode  = (mode & global.analyzer.EXPRmode) != 0
+      val byValMode = (mode & global.analyzer.BYVALmode) != 0
 
-      if ((mode & global.analyzer.PATTERNmode) != 0) {
-        if (!annots1.isEmpty) {
-          return tree modifyType removeAllCPSAnnotations
-        }
-      }
+      val annotsTree     = cpsParamAnnotation(tree.tpe)
+      val annotsExpected = cpsParamAnnotation(pt)
 
-/*
+      // not sure I rephrased this comment correctly:
+      // replacing `patMode` in the condition below by `patMode || ((mode & global.analyzer.TYPEmode) != 0 && (mode & global.analyzer.BYVALmode))`
       // doesn't work correctly -- still relying on addAnnotations to remove things from ValDef symbols
-      if ((mode & global.analyzer.TYPEmode) != 0 && (mode & global.analyzer.BYVALmode) != 0) {
-        if (!annots1.isEmpty) {
-          println("removing annotation from " + tree + "/" + tree.tpe)
-          val s = tree.setType(removeAllCPSAnnotations(tree.tpe))
-          println(s)
-          s
-        }
-      }
-*/
+      if (patMode && !annotsTree.isEmpty) tree modifyType removeAllCPSAnnotations
+      else if (exprMode && !byValMode && !hasPlusMarker(tree.tpe) && annotsTree.isEmpty && annotsExpected.nonEmpty) { // shiftUnit
+        // add a marker annotation that will make tree.tpe behave as pt, subtyping wise
+        // tree will look like having any possible annotation
+        //println("adapt annotations " + tree + " / " + tree.tpe + " / " + Integer.toHexString(mode) + " / " + pt)
 
-      if ((mode & global.analyzer.EXPRmode) != 0) {
-        if (annots1.isEmpty && !annots2.isEmpty && ((mode & global.analyzer.BYVALmode) == 0)) { // shiftUnit
-          // add a marker annotation that will make tree.tpe behave as pt, subtyping wise
-          // tree will look like having any possible annotation
-          //println("adapt annotations " + tree + " / " + tree.tpe + " / " + Integer.toHexString(mode) + " / " + pt)
-          //val same = annots2 forall { case AnnotationInfo(atp: TypeRef, _, _) => atp.typeArgs(0) =:= atp.typeArgs(1) }
-          // TBD: use same or not? see infer0.scala/infer1.scala
+        // CAVEAT:
+        //  for monomorphic answer types we want to have @plus @cps (for better checking)
+        //  for answer type modification we want to have only @plus (because actual answer type may differ from pt)
 
-          // CAVEAT:
-          //  for monomorphic answer types we want to have @plus @cps (for better checking)
-          //  for answer type modification we want to have only @plus (because actual answer type may differ from pt)
-
-          //val known = global.analyzer.isFullyDefined(pt)
-
-          if (/*same &&*/ !hasPlusMarker(tree.tpe)) {
-            //if (known)
-              return tree modifyType (_ withAnnotations newPlusMarker() :: annots2) // needed for #1807
-            //else
-            //  return tree.setType(tree.tpe.withAnnotations(adapt::Nil))
-          }
-          tree
-        } else if (!annots1.isEmpty && ((mode & global.analyzer.BYVALmode) != 0)) { // dropping annotation
-          // add a marker annotation that will make tree.tpe behave as pt, subtyping wise
-          // tree will look like having no annotation
-          if (!hasMinusMarker(tree.tpe)) {
-            return tree modifyType addMinusMarker
-          }
-        }
-      }
-      tree
+        val res = tree modifyType (_ withAnnotations newPlusMarker() :: annotsExpected) // needed for #1807
+        vprintln("adapted annotations (not by val) of " + tree + " to " + res.tpe)
+        res
+      } else if (exprMode && byValMode && !hasMinusMarker(tree.tpe) && annotsTree.nonEmpty) { // dropping annotation
+        // add a marker annotation that will make tree.tpe behave as pt, subtyping wise
+        // tree will look like having no annotation
+        val res = tree modifyType addMinusMarker
+        vprintln("adapted annotations (by val) of " + tree + " to " + res.tpe)
+        res
+      } else tree
     }
 
     def updateAttributesFromChildren(tpe: Type, childAnnots: List[AnnotationInfo], byName: List[Tree]): Type = {
@@ -222,6 +221,9 @@ abstract class CPSAnnotationChecker extends CPSUtils {
         case OverloadedType(pre, alts) =>
           OverloadedType(pre, alts.map((sym: Symbol) => updateAttributes(pre.memberType(sym), annots)))
         */
+        case OverloadedType(pre, alts) => tpe   //reconstruct correct annotations later
+        case MethodType(params, restpe) => tpe
+        case PolyType(params, restpe) => tpe
         case _ =>
           assert(childAnnots forall (_ matches MarkerCPSTypes), childAnnots)
           /*
@@ -229,7 +231,7 @@ abstract class CPSAnnotationChecker extends CPSUtils {
             plus + [] = plus
             cps + [] = cps
             plus cps + [] = plus cps
-            minus cps + [] = minus cp
+            minus cps + [] = minus cps
             synth cps + [] = synth cps // <- synth on left - does it happen?
 
             [] + cps = cps
@@ -313,18 +315,34 @@ abstract class CPSAnnotationChecker extends CPSUtils {
     def single(xs: List[AnnotationInfo]) = xs match {
       case List(x) => x
       case _ =>
-        global.globalError("not a single cps annotation: " + xs)// FIXME: error message
+        global.globalError("not a single cps annotation: " + xs)
         xs(0)
     }
+    
+    def emptyOrSingleList(xs: List[AnnotationInfo]) = if (xs.isEmpty) Nil else List(single(xs))
 
     def transChildrenInOrder(tree: Tree, tpe: Type, childTrees: List[Tree], byName: List[Tree]) = {
-      val children = childTrees.flatMap { t =>
+      def inspect(t: Tree): List[AnnotationInfo] = {
         if (t.tpe eq null) Nil else {
+          val extra: List[AnnotationInfo] = t.tpe match {
+            case _: MethodType | _: PolyType | _: OverloadedType =>
+              // method types, poly types and overloaded types do not obtain cps annotions by propagation
+              // need to reconstruct transitively from their children.
+              t match {
+                case Select(qual, name) => inspect(qual)
+                case Apply(fun, args) => (fun::(transArgList(fun,args).flatten)) flatMap inspect
+                case TypeApply(fun, args) => (fun::(transArgList(fun,args).flatten)) flatMap inspect
+                case _ => Nil
+              }
+            case _ => Nil
+          }
+
           val types = cpsParamAnnotation(t.tpe)
           // TODO: check that it has been adapted and if so correctly
-          if (types.isEmpty) Nil else List(single(types))
+          extra ++ emptyOrSingleList(types)
         }
       }
+      val children = childTrees flatMap inspect
 
       val newtpe = updateAttributesFromChildren(tpe, children, byName)
 
@@ -359,9 +377,15 @@ abstract class CPSAnnotationChecker extends CPSUtils {
 
           transChildrenInOrder(tree, tpe, qual::(transArgList(fun, args).flatten), Nil)
 
+        case Apply(TypeApply(fun @ Select(qual, name), targs), args) if fun.isTyped => // not trigge
+
+          vprintln("[checker] checking select apply type-apply " + tree + "/" + tpe)
+
+          transChildrenInOrder(tree, tpe, qual::(transArgList(fun, args).flatten), Nil)
+
         case TypeApply(fun @ Select(qual, name), args) if fun.isTyped =>
           def stripNullaryMethodType(tp: Type) = tp match { case NullaryMethodType(restpe) => restpe case tp => tp }
-          vprintln("[checker] checking select apply " + tree + "/" + tpe)
+          vprintln("[checker] checking select type-apply " + tree + "/" + tpe)
 
           transChildrenInOrder(tree, stripNullaryMethodType(tpe), List(qual, fun), Nil)
 
@@ -373,7 +397,7 @@ abstract class CPSAnnotationChecker extends CPSUtils {
 
         case TypeApply(fun, args) =>
 
-          vprintln("[checker] checking type apply " + tree + "/" + tpe)
+          vprintln("[checker] checking unknown type apply " + tree + "/" + tpe)
 
           transChildrenInOrder(tree, tpe, List(fun), Nil)
 
@@ -410,11 +434,10 @@ abstract class CPSAnnotationChecker extends CPSUtils {
           transChildrenInOrder(tree, tpe, List(cond), List(thenp, elsep))
 
         case Match(select, cases) =>
-          // TODO: can there be cases that are not CaseDefs?? check collect vs map!
-          transChildrenInOrder(tree, tpe, List(select), cases:::(cases collect { case CaseDef(_, _, body) => body }))
+          transChildrenInOrder(tree, tpe, List(select), cases:::(cases map { case CaseDef(_, _, body) => body }))
 
         case Try(block, catches, finalizer) =>
-          val tpe1 = transChildrenInOrder(tree, tpe, Nil, block::catches:::(catches collect { case CaseDef(_, _, body) => body }))
+          val tpe1 = transChildrenInOrder(tree, tpe, Nil, block::catches:::(catches map { case CaseDef(_, _, body) => body }))
 
           val annots = cpsParamAnnotation(tpe1)
           if (annots.nonEmpty) {

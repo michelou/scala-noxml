@@ -16,22 +16,21 @@ import collection.mutable.ListBuffer
 class JLineCompletion(val intp: IMain) extends Completion with CompletionOutput {
   val global: intp.global.type = intp.global
   import global._
-  import definitions.{ PredefModule, RootClass, AnyClass, AnyRefClass, ScalaPackage, JavaLangPackage }
+  import definitions.{ PredefModule, RootClass, AnyClass, AnyRefClass, ScalaPackage, JavaLangPackage, getModuleIfDefined }
   type ExecResult = Any
-  import intp.{ debugging, afterTyper }
+  import intp.{ debugging }
 
   // verbosity goes up with consecutive tabs
   private var verbosity: Int = 0
   def resetVerbosity() = verbosity = 0
 
-  def getType(name: String, isModule: Boolean) = {
-    val f = if (isModule) definitions.getModule(_: Name) else definitions.getClass(_: Name)
-    try Some(f(name).tpe)
-    catch { case _: MissingRequirementError => None }
-  }
-
-  def typeOf(name: String) = getType(name, false)
-  def moduleOf(name: String) = getType(name, true)
+  def getSymbol(name: String, isModule: Boolean) = (
+    if (isModule) getModuleIfDefined(name)
+    else getModuleIfDefined(name)
+  )
+  def getType(name: String, isModule: Boolean) = getSymbol(name, isModule).tpe
+  def typeOf(name: String)                     = getType(name, false)
+  def moduleOf(name: String)                   = getType(name, true)
 
   trait CompilerCompletion {
     def tp: Type
@@ -46,9 +45,9 @@ class JLineCompletion(val intp: IMain) extends Completion with CompletionOutput 
     private def anyMembers = AnyClass.tpe.nonPrivateMembers
     def anyRefMethodsToShow = Set("isInstanceOf", "asInstanceOf", "toString")
 
-    def tos(sym: Symbol) = sym.name.decode.toString
-    def memberNamed(s: String) = members find (x => tos(x) == s)
-    def hasMethod(s: String) = methods exists (x => tos(x) == s)
+    def tos(sym: Symbol): String = sym.decodedName
+    def memberNamed(s: String) = afterTyper(effectiveTp member newTermName(s))
+    def hasMethod(s: String) = memberNamed(s).isMethod
 
     // XXX we'd like to say "filterNot (_.isDeprecated)" but this causes the
     // compiler to crash for reasons not yet known.
@@ -61,6 +60,13 @@ class JLineCompletion(val intp: IMain) extends Completion with CompletionOutput 
     def methodNames   = methods map tos
     def packageNames  = packages map tos
     def aliasNames    = aliases map tos
+  }
+
+  object NoTypeCompletion extends TypeMemberCompletion(NoType) {
+    override def memberNamed(s: String) = NoSymbol
+    override def members = Nil
+    override def follow(s: String) = None
+    override def alternativesFor(id: String) = Nil
   }
 
   object TypeMemberCompletion {
@@ -90,7 +96,8 @@ class JLineCompletion(val intp: IMain) extends Completion with CompletionOutput 
       }
     }
     def apply(tp: Type): TypeMemberCompletion = {
-      if (tp.typeSymbol.isPackageClass) new PackageCompletion(tp)
+      if (tp eq NoType) NoTypeCompletion
+      else if (tp.typeSymbol.isPackageClass) new PackageCompletion(tp)
       else new TypeMemberCompletion(tp)
     }
     def imported(tp: Type) = new ImportCompletion(tp)
@@ -118,7 +125,7 @@ class JLineCompletion(val intp: IMain) extends Completion with CompletionOutput 
       debugging(tp + " completions ==> ")(filtered(memberNames))
 
     override def follow(s: String): Option[CompletionAware] =
-      debugging(tp + " -> '" + s + "' ==> ")(memberNamed(s) map (x => TypeMemberCompletion(x.tpe)))
+      debugging(tp + " -> '" + s + "' ==> ")(Some(TypeMemberCompletion(memberNamed(s).tpe)) filterNot (_ eq NoTypeCompletion))
 
     override def alternativesFor(id: String): List[String] =
       debugging(id + " alternatives ==> ") {
@@ -155,28 +162,29 @@ class JLineCompletion(val intp: IMain) extends Completion with CompletionOutput 
   object ids extends CompletionAware {
     override def completions(verbosity: Int) = intp.unqualifiedIds ++ List("classOf") //, "_root_")
     // now we use the compiler for everything.
-    override def follow(id: String) = {
-      if (completions(0) contains id) {
-        intp typeOfExpression id map { tpe =>
-          def default = TypeMemberCompletion(tpe)
+    override def follow(id: String): Option[CompletionAware] = {
+      if (!completions(0).contains(id))
+        return None
 
-          // only rebinding vals in power mode for now.
-          if (!isReplPower) default
-          else intp runtimeClassAndTypeOfTerm id match {
-            case Some((clazz, runtimeType)) =>
-              val sym = intp.symbolOfTerm(id)
-              if (sym.isStable) {
-                val param = new NamedParam.Untyped(id, intp valueOfTerm id getOrElse null)
-                TypeMemberCompletion(tpe, runtimeType, param)
-              }
-              else default
-            case _        =>
-              default
+      val tpe = intp typeOfExpression id
+      if (tpe == NoType)
+        return None
+
+      def default = Some(TypeMemberCompletion(tpe))
+
+      // only rebinding vals in power mode for now.
+      if (!isReplPower) default
+      else intp runtimeClassAndTypeOfTerm id match {
+        case Some((clazz, runtimeType)) =>
+          val sym = intp.symbolOfTerm(id)
+          if (sym.isStable) {
+            val param = new NamedParam.Untyped(id, intp valueOfTerm id getOrElse null)
+            Some(TypeMemberCompletion(tpe, runtimeType, param))
           }
-        }
+          else default
+        case _        =>
+          default
       }
-      else
-        None
     }
     override def toString = "<repl ids> (%s)".format(completions(0).size)
   }
@@ -186,14 +194,7 @@ class JLineCompletion(val intp: IMain) extends Completion with CompletionOutput 
 
   // literal Ints, Strings, etc.
   object literals extends CompletionAware {
-    def simpleParse(code: String): Tree = {
-      val unit    = new CompilationUnit(new util.BatchSourceFile("<console>", code))
-      val scanner = new syntaxAnalyzer.UnitParser(unit)
-      val tss     = scanner.templateStatSeq(false)._2
-
-      if (tss.size == 1) tss.head else EmptyTree
-    }
-
+    def simpleParse(code: String): Tree = newUnitParser(code).templateStats().last
     def completions(verbosity: Int) = Nil
 
     override def follow(id: String) = simpleParse(id) match {
@@ -278,19 +279,6 @@ class JLineCompletion(val intp: IMain) extends Completion with CompletionOutput 
     if (parsed.isEmpty) xs map ("." + _) else xs
   }
 
-  // chasing down results which won't parse
-  def execute(line: String): Option[ExecResult] = {
-    val parsed = Parsed(line)
-    def noDotOrSlash = line forall (ch => ch != '.' && ch != '/')
-
-    if (noDotOrSlash) None  // we defer all unqualified ids to the repl.
-    else {
-      (ids executionFor parsed) orElse
-      (rootClass executionFor parsed) orElse
-      (FileCompletion executionFor line)
-    }
-  }
-
   // generic interface for querying (e.g. interpreter loop, testing)
   def completions(buf: String): List[String] =
     topLevelFor(Parsed.dotted(buf + ".", buf.length + 1))
@@ -354,15 +342,9 @@ class JLineCompletion(val intp: IMain) extends Completion with CompletionOutput 
         if (!looksLikeInvocation(buf)) None
         else tryCompletion(Parsed.dotted(buf drop 1, cursor), lastResultFor)
 
-      def regularCompletion = tryCompletion(mkDotted, topLevelFor)
-      def fileCompletion    =
-        if (!looksLikePath(buf)) None
-        else tryCompletion(mkUndelimited, FileCompletion completionsFor _.buffer)
-
       def tryAll = (
                   lastResultCompletion
-           orElse regularCompletion
-           orElse fileCompletion
+           orElse tryCompletion(mkDotted, topLevelFor)
         getOrElse Candidates(cursor, Nil)
       )
 

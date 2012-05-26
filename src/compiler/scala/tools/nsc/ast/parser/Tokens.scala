@@ -45,11 +45,13 @@ abstract class Tokens {
 }
 
 object Tokens extends Tokens {
-  final val STRINGPART = 7
+  final val STRINGPART = 7  // a part of an interpolated string
   final val SYMBOLLIT = 8
-  final val STRINGFMT = 9
+  final val INTERPOLATIONID = 9 // the lead identifier of an interpolated string
+
   def isLiteral(code: Int) =
-    code >= CHARLIT && code <= SYMBOLLIT
+    code >= CHARLIT && code <= INTERPOLATIONID
+
 
   /** identifiers */
   final val IDENTIFIER = 10
@@ -108,6 +110,8 @@ object Tokens extends Tokens {
   final val MATCH = 58
   final val FORSOME = 59
   final val LAZY = 61
+  final val MACRO = 62 // not yet used in 2.10
+  final val THEN = 63  // not yet used in 2.10
 
   def isKeyword(code: Int) =
     code >= IF && code <= LAZY
@@ -148,10 +152,10 @@ object Tokens extends Tokens {
   final val LBRACE = 94
   final val RBRACE = 95
 
-/*@XML*/
+/*@XML
   /** XML mode */
   final val XMLSTART = 96
-/*XML@*/
+XML@*/
 
   /** for IDE only */
   final val COMMENT = 97

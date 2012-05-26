@@ -8,7 +8,7 @@ package reporters
 
 import java.io.{ BufferedReader, IOException, PrintWriter }
 import util._
-import scala.tools.util.StringOps.countElementsAsString
+import scala.tools.util.StringOps
 
 /**
  * This class implements a Reporter that displays messages on a text
@@ -40,27 +40,14 @@ class ConsoleReporter(val settings: Settings, reader: BufferedReader, writer: Pr
    *  @return         ...
    */
   private def getCountString(severity: Severity): String =
-    countElementsAsString((severity).count, label(severity))
+    StringOps.countElementsAsString((severity).count, label(severity))
 
   /** Prints the message. */
   def printMessage(msg: String) { writer.print(msg + "\n"); writer.flush() }
 
   /** Prints the message with the given position indication. */
   def printMessage(posIn: Position, msg: String) {
-    val pos = if (posIn eq null) NoPosition
-              else if (posIn.isDefined) posIn.inUltimateSource(posIn.source)
-              else posIn
-    pos match {
-      case FakePos(fmsg) =>
-        printMessage(fmsg+" "+msg)
-      case NoPosition =>
-        printMessage(msg)
-      case _ =>
-        val buf = new StringBuilder(msg)
-        val file = pos.source.file
-        printMessage((if (shortname) file.name else file.path)+":"+pos.line+": "+msg)
-        printSourceLine(pos)
-    }
+    printMessage(Position.formatMessage(posIn, msg, shortname))
   }
   def print(pos: Position, msg: String, severity: Severity) {
     printMessage(pos, clabel(severity) + msg)
@@ -88,7 +75,6 @@ class ConsoleReporter(val settings: Settings, reader: BufferedReader, writer: Pr
   }
 
   def display(pos: Position, msg: String, severity: Severity) {
-    severity.count += 1
     if (severity != ERROR || severity.count <= ERROR_LIMIT)
       print(pos, msg, severity)
   }

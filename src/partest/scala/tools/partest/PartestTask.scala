@@ -11,16 +11,13 @@ package partest
 
 import scala.actors.Actor._
 import scala.util.Properties.setProp
-
-import ant.sabbus.CompilationPathProperty
-import nsc.io.{ Directory, Path => SPath }
+import scala.tools.nsc.io.{ Directory, Path => SPath }
 import nsc.util.ClassPath
 import util.PathResolver
-
+import scala.tools.ant.sabbus.CompilationPathProperty
 import java.io.File
 import java.lang.reflect.Method
-
-import org.apache.tools.ant.{BuildException, Task}
+import org.apache.tools.ant.Task
 import org.apache.tools.ant.types.{Path, Reference, FileSet}
 import org.apache.tools.ant.types.Commandline.Argument
 
@@ -111,18 +108,11 @@ class PartestTask extends Task with CompilationPathProperty {
     antFiles = Some(input)
   }
 
-/*============================================================================*\
-**                             Properties setters                             **
-\*============================================================================*/
 
-  /** Sets the `srcdir` attribute. Used by [[http://ant.apache.org Ant]].
-   *  @param input The value of `srcdir`. */
   def setSrcDir(input: String) {
     srcDir = Some(input)
   }
 
-  /** Sets the `classpath` attribute. Used by [[http://ant.apache.org Ant]].
-   *  @param input The value of `classpath`. */
   def setClasspath(input: Path) {
     if (classpath.isEmpty)
       classpath = Some(input)
@@ -135,44 +125,30 @@ class PartestTask extends Task with CompilationPathProperty {
     classpath.get.createPath()
   }
 
-  /** Sets the `classpathref` attribute. Used by [[http://ant.apache.org Ant]].
-   *  @param input The value of `classpathref`. */
   def setClasspathref(input: Reference) {
     createClasspath().setRefid(input)
   }
 
-  /** Sets the `showlog` attribute. Used by [[http://ant.apache.org Ant]].
-   *  @param input The value of `showlog`. */
   def setShowLog(input: Boolean) {
     showLog = input
   }
 
-  /** Sets the `showdiff` attribute. Used by [[http://ant.apache.org Ant]].
-   *  @param input The value of `showdiff`. */
   def setShowDiff(input: Boolean) {
     showDiff = input
   }
 
-  /** Sets the `erroronfailed` attribute. Used by [[http://ant.apache.org Ant]].
-   *  @param input The value of `erroronfailed`. */
   def setErrorOnFailed(input: Boolean) {
     errorOnFailed = input
   }
 
-  /** Sets the `javacmd` attribute. Used by [[http://ant.apache.org Ant]].
-   *  @param input The value of `javacmd`. */
   def setJavaCmd(input: File) {
     javacmd = Some(input)
   }
 
-  /** Sets the `javaccmd` attribute. Used by [[http://ant.apache.org Ant]].
-   *  @param input The value of `javaccmd`. */
   def setJavacCmd(input: File) {
     javaccmd = Some(input)
   }
 
-  /** Sets the `scalacopts` attribute. Used by [[http://ant.apache.org Ant]].
-   *  @param input The value of `scalacopts`. */
   def setScalacOpts(input: String) {
     val s = input.split(' ').map { s => val a = new Argument; a.setValue(s); a }
     scalacArgs = Some(scalacArgs.getOrElse(Seq()) ++ s)
@@ -184,25 +160,18 @@ class PartestTask extends Task with CompilationPathProperty {
     a
   }
 
-  /** Sets the `timeout` attribute. Used by [[http://ant.apache.org Ant]].
-   *  @param input The value of `timeout`. */
   def setTimeout(delay: String) {
     timeout = Some(delay)
   }
 
-  /** Sets the `debug` attribute. Used by [[http://ant.apache.org Ant]].
-   *  @param input The value of `debug`. */
   def setDebug(input: Boolean) {
     debug = input
   }
 
-  /** Sets the `junitreportdir` attribute. Used by [[http://ant.apache.org Ant]].
-   *  @param input The value of `junitreportdir`. */
   def setJUnitReportDir(input: File) {
     jUnitReportDir = Some(input)
   }
 
-  /** The class path to use for this compilation. */
   private var classpath: Option[Path] = None
   private var srcDir: Option[String] = None
   private var javacmd: Option[File] = None
@@ -229,72 +198,42 @@ class PartestTask extends Task with CompilationPathProperty {
   private var jUnitReportDir: Option[File] = None
   private var debug = false
 
-  private def fileSetToDir(fs: FileSet) = Directory(fs getDir getProject)
-
-  private def getFiles(fileSet: Option[FileSet]): Array[File] = fileSet match {
-    case None =>
-      Array()
-    case Some(fs) =>
-      val sFiles: Array[SPath] = {
-        val ds = fs getDirectoryScanner getProject
-        val root = fileSetToDir(fs)
-        // From the Ant manual: When no list of include patterns is supplied,
-        // "**" will be used, which means that everything will be matched.
-        // When no list of exclude patterns is supplied, an empty list is used,
-        // such that nothing will be excluded. When no selectors are supplied,
-        // none are applied.
-        val included = ds.getIncludedFiles // relative to base directory
-        val includes: Array[SPath] =
-          if (included.length > 0) (included map (root / _)).toArray
-          else root.files.toArray // todo: deepFiles ?
-        val excluded = ds.getExcludedFiles // relative to base directory
-        val excludes: Array[SPath] =
-          if (excluded.length > 0) (excluded map (root / _)).toArray
-          else Array()
-        //println("included files in "+root)
-        //println("\t"+includes.mkString("\n\t"))
-        //println("excluded files in "+root)
-        //println("\t"+excludes.mkString("\n\t"))
-        includes diff excludes
-      }
-      def shouldExclude(p: SPath) = (p hasExtension "log") || (p.name startsWith ".")
-      sFiles filterNot (shouldExclude(_)) map (_.jfile)
+  def fileSetToDir(fs: FileSet) = Directory(fs getDir getProject)
+  def fileSetToArray(fs: FileSet): Array[SPath] = {
+    val root = fileSetToDir(fs)
+    (fs getDirectoryScanner getProject).getIncludedFiles map (root / _)
   }
 
-  private def getDirs(fileSet: Option[FileSet]): Array[File] = fileSet match {
-    case None =>
-      Array()
-    case Some(fs) =>
-      val sDirectories: Array[SPath] = {
-        val ds = fs getDirectoryScanner getProject
-        val root = fileSetToDir(fs)
-        // From the Ant manual: When no list of include patterns is supplied,
-        // "**" will be used, which means that everything will be matched.
-        // When no list of exclude patterns is supplied, an empty list is used,
-        // such that nothing will be excluded. When no selectors are supplied,
-        // none are applied.
-        val included = ds.getIncludedDirectories // relative to base directory
-        val includes: Array[SPath] =
-          if (included.length > 0) (included map (root / _)).toArray
-          else root.dirs.toArray
-        val excluded = ds.getExcludedDirectories // relative to base directory
-        val excludes: Array[SPath] =
-          if (excluded.length > 0) (excluded map (root / _)).toArray
-          else Array()
-        //println("included files in "+root)
-        //println("\t"+includes.mkString("\n\t"))
-        //println("excluded files in "+root)
-        //println("\t"+excludes.mkString("\n\t"))
-        includes diff excludes
-      }
-      def shouldExclude(p: SPath) = (p hasExtension "obj") || (p.name startsWith ".")
-      sDirectories filterNot (shouldExclude(_)) map (_.jfile)
+  private def getFiles(fileSet: Option[FileSet]): Array[File] = fileSet match {
+    case None     => Array()
+    case Some(fs) => fileSetToArray(fs) filterNot (_ hasExtension "log") map (_.jfile)
   }
 
   private def getFilesAndDirs(fileSet: Option[FileSet]): Array[File] = fileSet match {
     case None     => Array()
-    case Some(fs) => getFiles(fileSet) ++ getDirs(fileSet)
+    case Some(fs) =>
+      def shouldExclude(name: String) = (name endsWith ".obj") || (name startsWith ".")
+      // println("----> " + fileSet)
+
+      val fileTests = getFiles(Some(fs)) filterNot (x => shouldExclude(x.getName))
+      val dirResult = getDirs(Some(fs))  filterNot (x => shouldExclude(x.getName))
+      // println("dirs: " + dirResult.toList)
+      // println("files: " + fileTests.toList)
+
+      dirResult ++ fileTests
   }
+
+  private def getDirs(fileSet: Option[FileSet]): Array[File] = fileSet match {
+    case None     => Array()
+    case Some(fs) =>
+      def shouldExclude(name: String) = (name endsWith ".obj") || (name startsWith ".")
+
+      val dirTests: Iterator[SPath] = fileSetToDir(fs).dirs filterNot (x => shouldExclude(x.name))
+      val dirResult = dirTests.toList.toArray map (_.jfile)
+
+      dirResult
+  }
+
 
   private def getPosFiles          = getFilesAndDirs(posFiles)
   private def getNegFiles          = getFilesAndDirs(negFiles)
@@ -340,6 +279,36 @@ class PartestTask extends Task with CompilationPathProperty {
       }
     } getOrElse sys.error("Provided classpath does not contain a Scala library.")
 
+    val scalaCompiler = {
+      (classpath.list map { fs => new File(fs) }) find { f =>
+        f.getName match {
+          case "scala-compiler.jar" => true
+          case "compiler" if (f.getParentFile.getName == "classes") => true
+          case _ => false
+        }
+      }
+    } getOrElse sys.error("Provided classpath does not contain a Scala compiler.")
+
+    val scalaPartest = {
+      (classpath.list map { fs => new File(fs) }) find { f =>
+        f.getName match {
+          case "scala-partest.jar" => true
+          case "partest" if (f.getParentFile.getName == "classes") => true
+          case _ => false
+        }
+      }
+    } getOrElse sys.error("Provided classpath does not contain a Scala partest.")
+
+    val scalaActors = {
+      (classpath.list map { fs => new File(fs) }) find { f =>
+        f.getName match {
+          case "scala-actors.jar" => true
+          case "actors" if (f.getParentFile.getName == "classes") => true
+          case _ => false
+        }
+      }
+    } getOrElse sys.error("Provided classpath does not contain a Scala actors.")
+
     def scalacArgsFlat: Option[Seq[String]] = scalacArgs map (_ flatMap { a =>
       val parts = a.getParts
       if(parts eq null) Seq[String]() else parts.toSeq
@@ -348,11 +317,24 @@ class PartestTask extends Task with CompilationPathProperty {
     val antRunner = new scala.tools.partest.nest.AntRunner
     val antFileManager = antRunner.fileManager
 
+    // this is a workaround for https://issues.scala-lang.org/browse/SI-5433
+    // when that bug is fixed, this paragraph of code can be safely removed
+    // we hack into the classloader that will become parent classloader for scalac
+    // this way we ensure that reflective macro lookup will pick correct Code.lift
+    val loader = getClass.getClassLoader.asInstanceOf[org.apache.tools.ant.AntClassLoader]
+    val path = new org.apache.tools.ant.types.Path(getProject())
+    val newClassPath = ClassPath.join(nest.PathSettings.srcCodeLib.toString, loader.getClasspath)
+    path.setPath(newClassPath)
+    loader.setClassPath(path)
+
     antFileManager.showDiff = showDiff
     antFileManager.showLog = showLog
     antFileManager.failed = runFailed
     antFileManager.CLASSPATH = ClassPath.join(classpath.list: _*)
     antFileManager.LATEST_LIB = scalaLibrary.getAbsolutePath
+    antFileManager.LATEST_COMP = scalaCompiler.getAbsolutePath
+    antFileManager.LATEST_PARTEST = scalaPartest.getAbsolutePath
+    antFileManager.LATEST_ACTORS = scalaActors.getAbsolutePath
 
     javacmd foreach (x => antFileManager.JAVACMD = x.getAbsolutePath)
     javaccmd foreach (x => antFileManager.JAVAC_CMD = x.getAbsolutePath)
@@ -385,8 +367,8 @@ class PartestTask extends Task with CompilationPathProperty {
         val (succs, fails) = resultsToStatistics(results)
 
         val failed: Iterable[String] = results collect {
-          case (path, 1) => path + " [FAILED]"
-          case (path, 2) => path + " [TIMOUT]"
+          case (path, 1)    => path + " [FAILED]"
+          case (path, 2)    => path + " [TIMOUT]"
         }
 
         // create JUnit Report xml files if directory was specified
@@ -394,12 +376,12 @@ class PartestTask extends Task with CompilationPathProperty {
           d.mkdir()
 
           val report = testReport(name, results, succs, fails)
-/*@XML*/
+/*@XML
           scala.xml.XML.save(d.getAbsolutePath+"/"+name+".xml", report)
-/*XML@*/
-/*@NOXML
+XML@*/
+/*@NOXML*/
           util.XML.save(d.getAbsolutePath+"/"+name+".xml", report)
-XMLNO@*/
+/*XMLNO@*/
         }
 
         (succs, fails, failed)
@@ -422,25 +404,25 @@ XMLNO@*/
 
     f(msg)
   }
-/*@XML*/ // NB. This code DOES rely on Scala native XML support.
+/*@XML // NB. This code DOES rely on Scala native XML support.
   private def oneResult(res: (String, Int)) =
     <testcase name={res._1}>{
-  	  res._2 match {
-  	    case 0 => scala.xml.NodeSeq.Empty
+      res._2 match {
+        case 0 => scala.xml.NodeSeq.Empty
         case 1 => <failure message="Test failed"/>
         case 2 => <failure message="Test timed out"/>
-  	  }
-  	}</testcase>
+      }
+    }</testcase>
 
   private def testReport(kind: String, results: Iterable[(String, Int)], succs: Int, fails: Int) =
     <testsuite name={kind} tests={(succs + fails).toString} failures={fails.toString}>
-  	  <properties/>
-  	  {
-  	    results.map(oneResult(_))
-  	  }
+      <properties/>
+      {
+        results.map(oneResult(_))
+      }
     </testsuite>
-/*XML@*/
-/*@NOXML // NB. This code DOES NOT rely on Scala native XML support.
+XML@*/
+/*@NOXML*/ // NB. This code DOES NOT rely on Scala native XML support.
   private def testReport(kind: String, results: Iterable[(String, Int)], succs: Int, fails: Int) = {
     val root = util.XML.newDocument()
 
@@ -471,5 +453,5 @@ XMLNO@*/
 
     root
   }
-XMLNO@*/
+/*XMLNO@*/
 }

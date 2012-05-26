@@ -1,13 +1,10 @@
 /* NSC -- new Scala compiler
- * Copyright 2005-2011 LAMP/EPFL
+ * Copyright 2005-2012 LAMP/EPFL
  * @author Stephane Micheloud
  */
  
 package scala.tools
 package util
-
-// Dummy interface to fool ant.
-sealed trait XML
 
 /** The object `XML` provides minimal XML support for creating, loading
  *  and saving XML documents (see eg. [[scala.tools.ant.ScalaBazaar]],
@@ -21,7 +18,7 @@ sealed trait XML
  *  @author  Stephane Micheloud
  *  @version 1.0
  */
-/*@NOXML
+
 // [mics] used in code which DOES NOT rely on Scala native XML support
 // (see eg. classes partest/PartestTask.scala, ant/ScalaBazaar.scala).
 object XML {
@@ -146,5 +143,3 @@ object XML {
   }
 
 }
-XMLNO@*/
-

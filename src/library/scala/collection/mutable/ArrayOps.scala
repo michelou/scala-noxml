@@ -12,7 +12,8 @@ package scala.collection
 package mutable
 import compat.Platform.arraycopy
 
-import scala.reflect.ClassManifest
+import scala.reflect.ArrayTag
+import scala.runtime.ScalaRunTime._
 
 /*@PAR*/
 import parallel.mutable.ParArray
@@ -30,7 +31,7 @@ import parallel.mutable.ParArray
  *
  *  @tparam T   type of the elements contained in this array.
  *
- *  @define Coll ArrayOps
+ *  @define Coll `ArrayOps`
  *  @define orderDependent
  *  @define orderDependentFold
  *  @define mayNotTerminateInf
@@ -38,10 +39,8 @@ import parallel.mutable.ParArray
  */
 abstract class ArrayOps[T] extends ArrayLike[T, Array[T]] /*@PAR*/ with CustomParallelizable[T, ParArray[T]] /*PAR@*/ {
 
-  private def rowBuilder[U]: Builder[U, Array[U]] =
-    Array.newBuilder(
-      ClassManifest.fromClass(
-        repr.getClass.getComponentType.getComponentType.asInstanceOf[Predef.Class[U]]))
+  private def elementClass: Class[_] =
+    arrayElementClass(repr.getClass)
 
   override def copyToArray[U >: T](xs: Array[U], start: Int, len: Int) {
     var l = math.min(len, repr.length)
@@ -49,11 +48,13 @@ abstract class ArrayOps[T] extends ArrayLike[T, Array[T]] /*@PAR*/ with CustomPa
     Array.copy(repr, 0, xs, start, l)
   }
 
-  override def toArray[U >: T : ClassManifest]: Array[U] =
-    if (implicitly[ClassManifest[U]].erasure eq repr.getClass.getComponentType)
+  override def toArray[U >: T : ArrayTag]: Array[U] = {
+    val thatElementClass = arrayElementClass(implicitly[ArrayTag[U]])
+    if (elementClass eq thatElementClass)
       repr.asInstanceOf[Array[U]]
     else
       super.toArray[U]
+  }
 
   /*@PAR*/
   override def par = ParArray.handoff(repr)
@@ -63,12 +64,12 @@ abstract class ArrayOps[T] extends ArrayLike[T, Array[T]] /*@PAR*/ with CustomPa
    *  into a single array.
    *
    *  @tparam U        Type of row elements.
-   *  @param asArray   A function that converts elements of this array to rows - arrays of type `U`.
+   *  @param asTrav    A function that converts elements of this array to rows - arrays of type `U`.
    *  @return          An array obtained by concatenating rows of this array.
    */
-  def flatten[U, To](implicit asTrav: T => collection.Traversable[U], m: ClassManifest[U]): Array[U] = {
+  def flatten[U, To](implicit asTrav: T => collection.Traversable[U], m: ArrayTag[U]): Array[U] = {
     val b = Array.newBuilder[U]
-    b.sizeHint(map{case is: collection.IndexedSeq[_] => is.size case _ => 0} sum)
+    b.sizeHint(map{case is: collection.IndexedSeq[_] => is.size case _ => 0}.sum)
     for (xs <- this)
       b ++= asTrav(xs)
     b.result
@@ -81,7 +82,8 @@ abstract class ArrayOps[T] extends ArrayLike[T, Array[T]] /*@PAR*/ with CustomPa
    *  @return         An array obtained by replacing elements of this arrays with rows the represent.
    */
   def transpose[U](implicit asArray: T => Array[U]): Array[Array[U]] = {
-    val bs = asArray(head) map (_ => rowBuilder[U])
+    def mkRowBuilder() = Array.newBuilder(ClassTag[U](arrayElementClass(elementClass)))
+    val bs = asArray(head) map (_ => mkRowBuilder())
     for (xs <- this) {
       var i = 0
       for (x <- asArray(xs)) {
@@ -89,9 +91,7 @@ abstract class ArrayOps[T] extends ArrayLike[T, Array[T]] /*@PAR*/ with CustomPa
         i += 1
       }
     }
-    val bb: Builder[Array[U], Array[Array[U]]] = Array.newBuilder(
-      ClassManifest.fromClass(
-        repr.getClass.getComponentType.asInstanceOf[Predef.Class[Array[U]]]))
+    val bb: Builder[Array[U], Array[Array[U]]] = Array.newBuilder(ClassTag[Array[U]](elementClass))
     for (b <- bs) bb += b.result
     bb.result
   }
@@ -112,13 +112,12 @@ object ArrayOps {
 
     override protected[this] def thisCollection: WrappedArray[T] = new WrappedArray.ofRef[T](repr)
     override protected[this] def toCollection(repr: Array[T]): WrappedArray[T] = new WrappedArray.ofRef[T](repr)
-    override protected[this] def newBuilder = new ArrayBuilder.ofRef[T]()(
-      ClassManifest.classType[T](repr.getClass.getComponentType))
+    override protected[this] def newBuilder = new ArrayBuilder.ofRef[T]()(ClassTag[T](arrayElementClass(repr.getClass)))
 
     def length: Int = repr.length
     def apply(index: Int): T = repr(index)
     def update(index: Int, elem: T) { repr(index) = elem }
-  } 
+  }
 
   /** A class of `ArrayOps` for arrays containing `byte`s. */
   class ofByte(override val repr: Array[Byte]) extends ArrayOps[Byte] with ArrayLike[Byte, Array[Byte]] {

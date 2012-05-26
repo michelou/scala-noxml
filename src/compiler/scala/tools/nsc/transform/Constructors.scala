@@ -24,8 +24,8 @@ abstract class Constructors extends Transform with ast.TreeDSL {
   protected def newTransformer(unit: CompilationUnit): Transformer =
     new ConstructorTransformer(unit)
 
-  private val guardedCtorStats: mutable.Map[Symbol, List[Tree]] = new mutable.HashMap[Symbol, List[Tree]]
-  private val ctorParams: mutable.Map[Symbol, List[Symbol]] = new mutable.HashMap[Symbol, List[Symbol]]
+  private val guardedCtorStats: mutable.Map[Symbol, List[Tree]] = perRunCaches.newMap[Symbol, List[Tree]]
+  private val ctorParams: mutable.Map[Symbol, List[Symbol]] = perRunCaches.newMap[Symbol, List[Symbol]]
 
   class ConstructorTransformer(unit: CompilationUnit) extends Transformer {
 
@@ -44,11 +44,14 @@ abstract class Constructors extends Transform with ast.TreeDSL {
       )
       // decompose primary constructor into the three entities above.
       val constrInfo: ConstrInfo = {
-        val primary = stats find (_.symbol.isPrimaryConstructor)
-        assert(primary.isDefined, "no constructor in template: impl = " + impl)
-
-        val ddef @ DefDef(_, _, _, List(vparams), _, rhs @ Block(_, _)) = primary.get
+        stats find (_.symbol.isPrimaryConstructor) match {
+          case Some(ddef @ DefDef(_, _, _, List(vparams), _, rhs @ Block(_, _))) =>
         ConstrInfo(ddef, vparams map (_.symbol), rhs)
+          case x =>
+            // AnyVal constructor is OK
+            assert(clazz eq AnyValClass, "no constructor in template: impl = " + impl)
+            return impl
+        }
       }
       import constrInfo._
 
@@ -105,8 +108,7 @@ abstract class Constructors extends Transform with ast.TreeDSL {
 
       // Move tree into constructor, take care of changing owner from `oldowner` to constructor symbol
       def intoConstructor(oldowner: Symbol, tree: Tree) =
-        intoConstructorTransformer.transform(
-          new ChangeOwnerTraverser(oldowner, constr.symbol)(tree))
+        intoConstructorTransformer transform tree.changeOwner(oldowner -> constr.symbol)
 
       // Should tree be moved in front of super constructor call?
       def canBeMoved(tree: Tree) = tree match {
@@ -127,7 +129,7 @@ abstract class Constructors extends Transform with ast.TreeDSL {
 
         if (from.name != nme.OUTER) result
         else localTyper.typedPos(to.pos) {
-          IF (from OBJ_EQ NULL) THEN THROW(NullPointerExceptionClass) ELSE result
+          IF (from OBJ_EQ NULL) THEN Throw(NullPointerExceptionClass.tpe) ELSE result
         }
       }
 
@@ -165,20 +167,18 @@ abstract class Constructors extends Transform with ast.TreeDSL {
 
       // Triage all template definitions to go into defBuf/auxConstructorBuf, constrStatBuf, or constrPrefixBuf.
       for (stat <- stats) stat match {
-        case DefDef(mods, name, tparams, vparamss, tpt, rhs) =>
+        case DefDef(_,_,_,_,_,rhs) =>
           // methods with constant result type get literals as their body
           // all methods except the primary constructor go into template
           stat.symbol.tpe match {
             case MethodType(List(), tp @ ConstantType(c)) =>
-              defBuf += treeCopy.DefDef(
-                stat, mods, name, tparams, vparamss, tpt,
-                Literal(c) setPos rhs.pos setType tp)
+              defBuf += deriveDefDef(stat)(Literal(c) setPos _.pos setType tp)
             case _ =>
               if (stat.symbol.isPrimaryConstructor) ()
               else if (stat.symbol.isConstructor) auxConstructorBuf += stat
               else defBuf += stat
           }
-        case ValDef(mods, name, tpt, rhs) =>
+        case ValDef(_, _, _, rhs) =>
           // val defs with constant right-hand sides are eliminated.
           // for all other val defs, an empty valdef goes into the template and
           // the initializer goes as an assignment into the constructor
@@ -191,7 +191,7 @@ abstract class Constructors extends Transform with ast.TreeDSL {
               (if (canBeMoved(stat)) constrPrefixBuf else constrStatBuf) += mkAssign(
                 stat.symbol, rhs1)
             }
-            defBuf += treeCopy.ValDef(stat, mods, name, tpt, EmptyTree)
+            defBuf += deriveValDef(stat)(_ => EmptyTree)
           }
         case ClassDef(_, _, _, _) =>
           // classes are treated recursively, and left in the template
@@ -229,11 +229,11 @@ abstract class Constructors extends Transform with ast.TreeDSL {
           tree match {
             case DefDef(_, _, _, _, _, body)
             if (tree.symbol.isOuterAccessor && tree.symbol.owner == clazz && clazz.isEffectivelyFinal) =>
-              log("outerAccessors += " + tree.symbol.fullName)
+              debuglog("outerAccessors += " + tree.symbol.fullName)
               outerAccessors ::= ((tree.symbol, body))
             case Select(_, _) =>
               if (!mustbeKept(tree.symbol)) {
-                log("accessedSyms += " + tree.symbol.fullName)
+                debuglog("accessedSyms += " + tree.symbol.fullName)
                 accessedSyms addEntry tree.symbol
               }
               super.traverse(tree)
@@ -254,26 +254,18 @@ abstract class Constructors extends Transform with ast.TreeDSL {
       for ((accSym, accBody) <- outerAccessors)
         if (mustbeKept(accSym)) accessTraverser.traverse(accBody)
 
-      // Conflicting symbol list from parents: see bug #1960.
-      // It would be better to mangle the constructor parameter name since
-      // it can only be used internally, but I think we need more robust name
-      // mangling before we introduce more of it.
-      val parentSymbols = Map((for {
-        p <- impl.parents
-        if p.symbol.isTrait
-        sym <- p.symbol.info.nonPrivateMembers
-        if sym.isGetter && !sym.isOuterField
-      } yield sym.name -> p): _*)
-
       // Initialize all parameters fields that must be kept.
-      val paramInits =
-        for (acc <- paramAccessors if mustbeKept(acc)) yield {
-          if (parentSymbols contains acc.name)
-            unit.error(acc.pos, "parameter '%s' requires field but conflicts with %s in '%s'".format(
-              acc.name, acc.name, parentSymbols(acc.name)))
+      val paramInits = paramAccessors filter mustbeKept map { acc =>
+        // Check for conflicting symbol amongst parents: see bug #1960.
+        // It would be better to mangle the constructor parameter name since
+        // it can only be used internally, but I think we need more robust name
+        // mangling before we introduce more of it.
+        val conflict = clazz.info.nonPrivateMember(acc.name) filter (s => s.isGetter && !s.isOuterField && s.enclClass.isTrait)
+        if (conflict ne NoSymbol)
+          unit.error(acc.pos, "parameter '%s' requires field but conflicts with %s".format(acc.name, conflict.fullLocationString))
 
-          copyParam(acc, parameter(acc))
-        }
+        copyParam(acc, parameter(acc))
+      }
 
       /** Return a single list of statements, merging the generic class constructor with the
        *  specialized stats. The original statements are retyped in the current class, and
@@ -299,11 +291,10 @@ abstract class Constructors extends Transform with ast.TreeDSL {
          *  be an error to pass it to array_update(.., .., Object).
          */
         def rewriteArrayUpdate(tree: Tree): Tree = {
-          val array_update = definitions.ScalaRunTimeModule.info.member("array_update")
           val adapter = new Transformer {
             override def transform(t: Tree): Tree = t match {
-              case Apply(fun @ Select(receiver, method), List(xs, idx, v)) if fun.symbol == array_update =>
-                localTyper.typed(Apply(gen.mkAttributedSelect(xs, definitions.Array_update), List(idx, v)))
+              case Apply(fun @ Select(receiver, method), List(xs, idx, v)) if fun.symbol == arrayUpdateMethod =>
+                localTyper.typed(Apply(gen.mkAttributedSelect(xs, arrayUpdateMethod), List(idx, v)))
               case _ => super.transform(t)
             }
           }
@@ -371,9 +362,8 @@ abstract class Constructors extends Transform with ast.TreeDSL {
           val tree =
             If(
               Apply(
-                Select(
-                  Apply(gen.mkAttributedRef(specializedFlag), List()),
-                  definitions.getMember(definitions.BooleanClass, nme.UNARY_!)),
+                CODE.NOT (
+                 Apply(gen.mkAttributedRef(specializedFlag), List())),
                 List()),
               Block(stats, Literal(Constant())),
               EmptyTree)
@@ -402,11 +392,7 @@ abstract class Constructors extends Transform with ast.TreeDSL {
       /** Create a getter or a setter and enter into `clazz` scope
        */
       def addAccessor(sym: Symbol, name: TermName, flags: Long) = {
-        val m = (
-          clazz.newMethod(sym.pos, name)
-            setFlag (flags & ~LOCAL & ~PRIVATE)
-            setPrivateWithin clazz
-        )
+        val m = clazz.newMethod(name, sym.pos, flags & ~(LOCAL | PRIVATE)) setPrivateWithin clazz
         clazz.info.decls enter m
       }
 
@@ -414,12 +400,7 @@ abstract class Constructors extends Transform with ast.TreeDSL {
         val getr = addAccessor(
           sym, nme.getterName(sym.name), getterFlags(sym.flags))
         getr setInfo MethodType(List(), sym.tpe)
-        defBuf += localTyper.typed {
-          //util.trace("adding getter def for "+getr) {
-          atPos(sym.pos) {
-            DefDef(getr, Select(This(clazz), sym))
-          }//}
-        }
+        defBuf += localTyper.typedPos(sym.pos)(DefDef(getr, Select(This(clazz), sym)))
         getr
       }
 
@@ -463,28 +444,24 @@ abstract class Constructors extends Transform with ast.TreeDSL {
       def delayedInitClosure(stats: List[Tree]) =
         localTyper.typed {
           atPos(impl.pos) {
-            val closureClass = clazz.newClass(impl.pos, nme.delayedInitArg.toTypeName)
-              .setFlag(SYNTHETIC | FINAL)
-            val closureParents = List(AbstractFunctionClass(0).tpe, ScalaObjectClass.tpe)
-            closureClass.setInfo(new ClassInfoType(closureParents, new Scope, closureClass))
+            val closureClass   = clazz.newClass(nme.delayedInitArg.toTypeName, impl.pos, SYNTHETIC | FINAL)
+            val closureParents = List(AbstractFunctionClass(0).tpe)
 
-            val outerField = closureClass.newValue(impl.pos, nme.OUTER)
-              .setFlag(PrivateLocal | PARAMACCESSOR)
-              .setInfo(clazz.tpe)
+            closureClass setInfoAndEnter new ClassInfoType(closureParents, newScope, closureClass)
 
-            val applyMethod = closureClass.newMethod(impl.pos, nme.apply)
-              .setFlag(FINAL)
-              .setInfo(MethodType(List(), ObjectClass.tpe))
-
-            closureClass.info.decls enter outerField
-            closureClass.info.decls enter applyMethod
-
-            val outerFieldDef = ValDef(outerField)
-
-            val changeOwner = new ChangeOwnerTraverser(impl.symbol, applyMethod)
-
+            val outerField = (
+              closureClass
+                newValue(nme.OUTER, impl.pos, PrivateLocal | PARAMACCESSOR)
+                setInfoAndEnter clazz.tpe
+            )
+            val applyMethod = (
+              closureClass
+                newMethod(nme.apply, impl.pos, FINAL)
+                setInfoAndEnter MethodType(Nil, ObjectClass.tpe)
+            )
+            val outerFieldDef     = ValDef(outerField)
             val closureClassTyper = localTyper.atOwner(closureClass)
-            val applyMethodTyper = closureClassTyper.atOwner(applyMethod)
+            val applyMethodTyper  = closureClassTyper.atOwner(applyMethod)
 
             val constrStatTransformer = new Transformer {
               override def transform(tree: Tree): Tree = tree match {
@@ -516,8 +493,7 @@ abstract class Constructors extends Transform with ast.TreeDSL {
                           }
                         else tree
                       case _ =>
-                        changeOwner.changeOwner(tree)
-                        tree
+                        tree.changeOwner(impl.symbol -> applyMethod)
                     }
                   }
               }
@@ -540,14 +516,9 @@ abstract class Constructors extends Transform with ast.TreeDSL {
           }
         }
 
-      def delayedInitCall(closure: Tree) =
-        localTyper.typed {
-          atPos(impl.pos) {
-            Apply(
-              Select(This(clazz), delayedInitMethod),
-              List(New(TypeTree(closure.symbol.tpe), List(List(This(clazz))))))
-          }
-        }
+      def delayedInitCall(closure: Tree) = localTyper.typedPos(impl.pos) {
+        gen.mkMethodCall(This(clazz), delayedInitMethod, Nil, List(New(closure.symbol.tpe, This(clazz))))
+      }
 
       /** Return a pair consisting of (all statements up to and including superclass and trait constr calls, rest) */
       def splitAtSuper(stats: List[Tree]) = {
@@ -576,13 +547,12 @@ abstract class Constructors extends Transform with ast.TreeDSL {
       }
 
       // Assemble final constructor
-      defBuf += treeCopy.DefDef(
-        constr, constr.mods, constr.name, constr.tparams, constr.vparamss, constr.tpt,
+      defBuf += deriveDefDef(constr)(_ =>
         treeCopy.Block(
           constrBody,
           paramInits ::: constrPrefixBuf.toList ::: uptoSuperStats :::
             guardSpecializedInitializer(remainingConstrStats),
-          constrBody.expr));
+          constrBody.expr))
 
       // Followed by any auxiliary constructors
       defBuf ++= auxConstructorBuf
@@ -592,14 +562,13 @@ abstract class Constructors extends Transform with ast.TreeDSL {
         clazz.info.decls unlink sym
 
       // Eliminate all field definitions that can be dropped from template
-      treeCopy.Template(impl, impl.parents, impl.self,
-        defBuf.toList filter (stat => mustbeKept(stat.symbol)))
+      deriveTemplate(impl)(_ => defBuf.toList filter (stat => mustbeKept(stat.symbol)))
     } // transformClassTemplate
 
     override def transform(tree: Tree): Tree =
       tree match {
-        case ClassDef(mods, name, tparams, impl) if !tree.symbol.isInterface && !isValueClass(tree.symbol) =>
-          treeCopy.ClassDef(tree, mods, name, tparams, transformClassTemplate(impl))
+        case ClassDef(_,_,_,_) if !tree.symbol.isInterface && !isPrimitiveValueClass(tree.symbol) =>
+          deriveClassDef(tree)(transformClassTemplate)
         case _ =>
           super.transform(tree)
       }

@@ -22,14 +22,14 @@ trait IndexedSeq[+A] extends Seq[A]
                     with GenericTraversableTemplate[A, IndexedSeq]
                     with IndexedSeqLike[A, IndexedSeq[A]] {
   override def companion: GenericCompanion[IndexedSeq] = IndexedSeq
-  override def toIndexedSeq[B >: A]: IndexedSeq[B] = this
+  override def toIndexedSeq: IndexedSeq[A] = this
   override def seq: IndexedSeq[A] = this
 }
 
 /** $factoryInfo
  *  The current default implementation of a $Coll is a `Vector`.
  *  @define coll indexed sequence
- *  @define Coll IndexedSeq
+ *  @define Coll `IndexedSeq`
  */
 object IndexedSeq extends SeqFactory[IndexedSeq] {
   class Impl[A](buf: ArrayBuffer[A]) extends AbstractSeq[A] with IndexedSeq[A] with Serializable {

@@ -20,7 +20,7 @@ import parallel.immutable.ParIterable
 /** A base trait for iterable collections that are guaranteed immutable.
  *  $iterableInfo
  *
- *  @define Coll immutable.Iterable
+ *  @define Coll `immutable.Iterable`
  *  @define coll immutable iterable collection
  */
 trait Iterable[+A] extends Traversable[A]
@@ -38,7 +38,7 @@ trait Iterable[+A] extends Traversable[A]
 }
 
 /** $factoryInfo
- *  @define Coll immutable.Iterable
+ *  @define Coll `immutable.Iterable`
  *  @define coll immutable iterable collection
  */
 object Iterable extends TraversableFactory[Iterable] {

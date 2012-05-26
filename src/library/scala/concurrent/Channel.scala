@@ -25,7 +25,6 @@ class Channel[A] {
   private var nreaders = 0
 
   /**
-   *  @param x ...
    */
   def write(x: A) = synchronized {
     lastWritten.elem = x
@@ -46,4 +45,5 @@ class Channel[A] {
     written = written.next
     x
   }
+
 }
